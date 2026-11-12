@@ -819,7 +819,50 @@ jobs:
 
               private class AiError(val code: String, val detail: String = "") : Exception(code)
 
-              private val models = listOf("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash")
+              private val models = listOf("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash")
+              private var modelCache: List<String>? = null
+
+              // Ask Google which models this key can use right now, then prefer fast stable ones.
+              private fun listModels(key: String): List<String> {
+                  modelCache?.let { return it }
+                  val conn = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200")
+                      .openConnection() as HttpURLConnection
+                  try {
+                      conn.connectTimeout = 15000
+                      conn.readTimeout = 20000
+                      conn.setRequestProperty("x-goog-api-key", key)
+                      val code = conn.responseCode
+                      if (code == 401 || code == 403) throw AiError("nokey")
+                      if (code !in 200..299) return emptyList()
+                      val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                      val names = ArrayList<String>()
+                      try {
+                          val arr = JSONObject(text).optJSONArray("models") ?: return emptyList()
+                          val skip = listOf("image", "tts", "live", "audio", "embed", "vision", "thinking", "robotics", "computer", "native", "exp")
+                          for (i in 0 until arr.length()) {
+                              val o = arr.getJSONObject(i)
+                              val methods = o.optJSONArray("supportedGenerationMethods") ?: continue
+                              var ok = false
+                              for (j in 0 until methods.length()) if (methods.getString(j) == "generateContent") ok = true
+                              if (!ok) continue
+                              val n = o.optString("name").removePrefix("models/")
+                              val low = n.lowercase()
+                              if (!low.contains("flash")) continue
+                              if (skip.any { low.contains(it) }) continue
+                              names.add(n)
+                          }
+                      } catch (e: org.json.JSONException) {
+                          return emptyList()
+                      }
+                      val sorted = names.sortedWith(
+                          compareBy<String>({ it.contains("preview") }, { it.contains("lite") }).thenByDescending { it }
+                      )
+                      modelCache = sorted
+                      return sorted
+                  } finally {
+                      conn.disconnect()
+                  }
+              }
 
               private fun callModel(prompt: String): String {
                   val key = apiKey()
@@ -835,7 +878,9 @@ jobs:
                       })
                   }.toString()
                   var last = AiError("http", "no model")
-                  for (m in models) {
+                  val found = try { listModels(key) } catch (e: IOException) { emptyList() }
+                  val candidates = (found + models).distinct().take(6)
+                  for (m in candidates) {
                       try {
                           return callOnce(m, key, body)
                       } catch (e: AiError) {
