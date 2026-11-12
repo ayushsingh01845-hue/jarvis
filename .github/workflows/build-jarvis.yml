@@ -1,0 +1,1008 @@
+name: Build Jarvis APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-jarvis
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Create the Jarvis app files
+        run: |
+          cat > settings.gradle.kts <<'JARVIS_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Jarvis"
+          include(":app")
+          JARVIS_EOF
+          cat > build.gradle.kts <<'JARVIS_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          JARVIS_EOF
+          cat > gradle.properties <<'JARVIS_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          JARVIS_EOF
+          mkdir -p "app"
+          cat > app/build.gradle.kts <<'JARVIS_EOF'
+          import java.io.FileInputStream
+          import java.util.Properties
+
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          // Optional: a key baked in at build time from local.properties (never stored in the repo).
+          val localProps = Properties().apply {
+              val f = rootProject.file("local.properties")
+              if (f.exists()) load(FileInputStream(f))
+          }
+
+          android {
+              namespace = "com.ayush.jarvis"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.ayush.jarvis"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  buildConfigField("String", "GEMINI_API_KEY", "\"${localProps.getProperty("GEMINI_API_KEY", "")}\"")
+              }
+
+              buildTypes {
+                  debug { isMinifyEnabled = false }
+                  release { isMinifyEnabled = false }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { buildConfig = true }
+          }
+
+          dependencies {
+          }
+          JARVIS_EOF
+          mkdir -p "app"
+          cat > app/proguard-rules.pro <<'JARVIS_EOF'
+          JARVIS_EOF
+          mkdir -p "app/src/main"
+          cat > app/src/main/AndroidManifest.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="https" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.Jarvis">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+              </application>
+          </manifest>
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/ayush/jarvis"
+          cat > app/src/main/java/com/ayush/jarvis/MainActivity.kt <<'JARVIS_EOF'
+          package com.ayush.jarvis
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.AudioManager
+          import android.media.ToneGenerator
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.CountDownTimer
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.inputmethod.EditorInfo
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.IOException
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          class MainActivity : Activity(), RecognitionListener, TextToSpeech.OnInitListener {
+
+              // ---------- colors ----------
+              private val cBg = Color.parseColor("#070D13")
+              private val cPanel = Color.parseColor("#0E1822")
+              private val cLine = Color.parseColor("#1D3140")
+              private val cFg = Color.parseColor("#E2EEF5")
+              private val cDim = Color.parseColor("#8DA3B2")
+              private val cAccent = Color.parseColor("#3CC8E8")
+              private val cWarm = Color.parseColor("#FFB454")
+
+              // ---------- state ----------
+              private enum class St { IDLE, LISTENING, THINKING, SPEAKING }
+
+              private var state = St.IDLE
+              private var lang = "auto"          // auto | hi | en
+              private var speakOn = true
+              private var busy = false
+              private val history = ArrayList<Pair<String, String>>() // role, text
+
+              private lateinit var prefs: android.content.SharedPreferences
+              private var recognizer: SpeechRecognizer? = null
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+
+              // ---------- views ----------
+              private lateinit var log: LinearLayout
+              private lateinit var logScroll: ScrollView
+              private lateinit var timersBox: LinearLayout
+              private lateinit var orb: View
+              private lateinit var glow: View
+              private lateinit var statusView: TextView
+              private lateinit var liveView: TextView
+              private lateinit var typed: EditText
+              private lateinit var sendBtn: Button
+              private lateinit var langBtns: Map<String, Button>
+              private lateinit var voiceBtn: Button
+              private lateinit var clearBtn: Button
+              private lateinit var setupBtn: Button
+              private var helloView: View? = null
+              private var orbAnim: android.animation.ValueAnimator? = null
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun hi() = lang == "hi"
+
+              // ---------- texts ----------
+              private fun s(key: String): String {
+                  val h = hi()
+                  return when (key) {
+                      "tap" -> if (h) "बोलने के लिए छुएँ" else "Tap to talk"
+                      "listening" -> if (h) "सुन रहा हूँ… बोल चुकें तो छुएँ" else "Listening… tap when done"
+                      "thinking" -> if (h) "सोच रहा हूँ…" else "Thinking…"
+                      "speaking" -> if (h) "बोल रहा हूँ… रोकने के लिए छुएँ" else "Speaking… tap to stop"
+                      "ph" -> if (h) "या यहाँ लिखें" else "Or type here"
+                      "send" -> if (h) "भेजें" else "Send"
+                      "clear" -> if (h) "साफ़ करें" else "Clear"
+                      "voiceOn" -> if (h) "आवाज़ चालू" else "Voice on"
+                      "voiceOff" -> if (h) "आवाज़ बंद" else "Voice off"
+                      "setup" -> if (h) "सेटअप" else "Setup"
+                      "hello" -> if (h) "नमस्ते आयुष। बताइए, क्या करना है?" else "Hello Ayush. What do you need?"
+                      "noMic" -> if (h) "इस फ़ोन पर बोलकर पूछना उपलब्ध नहीं है। आप लिखकर पूछ सकते हैं."
+                      else "Talking is not available on this phone. You can type instead."
+                      "micDenied" -> if (h) "माइक्रोफ़ोन की अनुमति नहीं मिली। फ़ोन की सेटिंग में अनुमति दीजिए, या लिखकर पूछिए।"
+                      else "Microphone permission was declined. Allow it in the phone settings, or type instead."
+                      "timerDone" -> if (h) "समय पूरा हुआ" else "Time is up"
+                      "errKey" -> if (h) "कुंजी नहीं है या काम नहीं कर रही। सेटअप खोलकर नई कुंजी चिपकाइए।"
+                      else "The key is missing or not working. Open Setup and paste a new key."
+                      "errRate" -> if (h) "बहुत अनुरोध हो गए। कुछ सेकंड रुककर फिर कोशिश करें।"
+                      else "Too many requests. Wait a few seconds and try again."
+                      "errNet" -> if (h) "इंटरनेट नहीं है। कनेक्शन जाँचकर फिर कोशिश करें।"
+                      else "No internet. Check your connection and try again."
+                      "errGen" -> if (h) "कुछ गड़बड़ हो गई। कृपया फिर कोशिश करें।" else "Something went wrong. Please try again."
+                      "noHear" -> if (h) "कुछ सुनाई नहीं दिया। फिर से बोलिए।" else "I did not hear anything. Please try again."
+                      "setupTitle" -> if (h) "एक बार का सेटअप" else "One-time setup"
+                      "setupBody" -> if (h)
+                          "जार्विस को सोचने के लिए एक मुफ़्त कुंजी चाहिए।\n\n1. नीचे \"कुंजी लीजिए\" दबाइए और Google से लॉगिन कीजिए।\n2. \"Create API key\" दबाइए।\n3. कुंजी कॉपी करके यहाँ चिपकाइए और सेव दबाइए।"
+                      else
+                          "Jarvis needs a free key to think.\n\n1. Tap \"Get key\" below and sign in with Google.\n2. Tap \"Create API key\".\n3. Copy the key, paste it here and tap Save."
+                      "getKey" -> if (h) "कुंजी लीजिए" else "Get key"
+                      "keyHint" -> if (h) "अपनी कुंजी यहाँ चिपकाइए" else "Paste your key here"
+                      "save" -> if (h) "सेव करें" else "Save"
+                      "close" -> if (h) "बंद करें" else "Close"
+                      "keyShort" -> if (h) "यह कुंजी जैसी नहीं लग रही। कृपया फिर से चिपकाइए।" else "This does not look like a key. Please paste it again."
+                      "saved" -> if (h) "सेव हो गया। अब आप बोल सकते हैं।" else "Saved. You can start talking."
+                      else -> key
+                  }
+              }
+
+              private fun ideas(): List<String> = if (hi())
+                  listOf("मेरा दिन प्लान करो", "10 मिनट का टाइमर लगाओ", "दोस्त को शुभकामना का व्हाट्सऐप संदेश लिखो", "यूट्यूब पर कोई अच्छा गाना खोलो")
+              else
+                  listOf("Plan my day", "Set a 10 minute timer", "Write a WhatsApp message to wish my friend", "Open a good song on YouTube")
+
+              // ---------- lifecycle ----------
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("jarvis", Context.MODE_PRIVATE)
+                  lang = prefs.getString("lang", "auto") ?: "auto"
+                  speakOn = prefs.getBoolean("speak", true)
+
+                  buildUi()
+                  applyTexts()
+                  renderHello()
+
+                  tts = TextToSpeech(this, this)
+                  if (SpeechRecognizer.isRecognitionAvailable(this)) {
+                      recognizer = SpeechRecognizer.createSpeechRecognizer(this).also { it.setRecognitionListener(this) }
+                  } else {
+                      addNote(s("noMic"))
+                  }
+                  if (apiKey().isEmpty()) showSetup()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  try { recognizer?.destroy() } catch (_: Exception) {}
+                  try { tts?.stop(); tts?.shutdown() } catch (_: Exception) {}
+                  orbAnim?.cancel()
+                  timerItems.forEach { it.cdt.cancel() }
+              }
+
+              override fun onInit(status: Int) {
+                  ttsReady = status == TextToSpeech.SUCCESS
+                  if (ttsReady) {
+                      tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                          override fun onStart(utteranceId: String?) { runOnUiThread { setState(St.SPEAKING) } }
+                          override fun onDone(utteranceId: String?) { runOnUiThread { if (state == St.SPEAKING) setState(St.IDLE) } }
+                          @Deprecated("Deprecated in Java")
+                          override fun onError(utteranceId: String?) { runOnUiThread { if (state == St.SPEAKING) setState(St.IDLE) } }
+                      })
+                  }
+              }
+
+              // ---------- UI ----------
+              private fun pill(strokeColor: Int, fill: Int = Color.TRANSPARENT): GradientDrawable =
+                  GradientDrawable().apply {
+                      shape = GradientDrawable.RECTANGLE
+                      cornerRadius = dp(999).toFloat()
+                      setColor(fill)
+                      setStroke(dp(1), strokeColor)
+                  }
+
+              private fun smallButton(): Button = Button(this).apply {
+                  isAllCaps = false
+                  textSize = 14f
+                  setTextColor(cDim)
+                  background = pill(cLine)
+                  minHeight = 0; minimumHeight = dp(36)
+                  minWidth = 0; minimumWidth = 0
+                  setPadding(dp(12), 0, dp(12), 0)
+                  stateListAnimator = null
+              }
+
+              private fun buildUi() {
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(cBg)
+                      fitsSystemWindows = true
+                      setPadding(dp(16), dp(8), dp(16), dp(8))
+                  }
+
+                  // header
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  val brand = TextView(this).apply {
+                      text = "JARVIS"
+                      setTextColor(cAccent)
+                      textSize = 22f
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                      letterSpacing = 0.2f
+                  }
+                  header.addView(brand, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+                  val seg = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  val m = HashMap<String, Button>()
+                  for ((code, label) in listOf("auto" to "Auto", "hi" to "हिंदी", "en" to "English")) {
+                      val b = smallButton().apply {
+                          text = label
+                          setOnClickListener {
+                              lang = code
+                              prefs.edit().putString("lang", code).apply()
+                              applyTexts()
+                              if (history.isEmpty()) renderHello()
+                          }
+                      }
+                      m[code] = b
+                      seg.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginStart = dp(4) })
+                  }
+                  langBtns = m
+                  header.addView(seg)
+                  root.addView(header, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                  // second row of small buttons
+                  val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+                  voiceBtn = smallButton().apply { setOnClickListener {
+                      speakOn = !speakOn
+                      prefs.edit().putBoolean("speak", speakOn).apply()
+                      if (!speakOn) stopSpeaking()
+                      applyTexts()
+                  } }
+                  clearBtn = smallButton().apply { setOnClickListener {
+                      history.clear(); stopSpeaking(); renderHello()
+                  } }
+                  setupBtn = smallButton().apply { setOnClickListener { showSetup() } }
+                  for (b in listOf(voiceBtn, clearBtn, setupBtn)) {
+                      row2.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginStart = dp(6); topMargin = dp(6) })
+                  }
+                  root.addView(row2, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                  // conversation
+                  log = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  logScroll = ScrollView(this).apply {
+                      isFillViewport = true
+                      addView(log, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                  }
+                  root.addView(logScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(8) })
+
+                  // timers
+                  timersBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  root.addView(timersBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                  // live text
+                  liveView = TextView(this).apply {
+                      setTextColor(cFg); textSize = 15f; gravity = Gravity.CENTER; minHeight = dp(22)
+                  }
+                  root.addView(liveView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                  // orb
+                  val orbWrap = FrameLayout(this)
+                  glow = View(this).apply {
+                      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(cAccent) }
+                      alpha = 0.25f
+                  }
+                  orbWrap.addView(glow, FrameLayout.LayoutParams(dp(104), dp(104), Gravity.CENTER))
+                  orb = View(this).apply {
+                      contentDescription = "Talk to Jarvis"
+                      isClickable = true
+                      isFocusable = true
+                      setOnClickListener { onOrbTap() }
+                  }
+                  orbWrap.addView(orb, FrameLayout.LayoutParams(dp(84), dp(84), Gravity.CENTER))
+                  root.addView(orbWrap, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(112)))
+
+                  statusView = TextView(this).apply {
+                      setTextColor(cDim); textSize = 15f; gravity = Gravity.CENTER
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                  }
+                  root.addView(statusView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+                  // typing row
+                  val form = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  typed = EditText(this).apply {
+                      setTextColor(cFg); setHintTextColor(cDim); textSize = 16f
+                      background = pill(cLine, cPanel)
+                      setPadding(dp(16), 0, dp(16), 0)
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                      imeOptions = EditorInfo.IME_ACTION_SEND
+                      setSingleLine(true)
+                      setOnEditorActionListener { _, actionId, _ ->
+                          if (actionId == EditorInfo.IME_ACTION_SEND) { submitTyped(); true } else false
+                      }
+                  }
+                  form.addView(typed, LinearLayout.LayoutParams(0, dp(46), 1f))
+                  sendBtn = Button(this).apply {
+                      isAllCaps = false; textSize = 16f
+                      setTextColor(Color.parseColor("#05161C"))
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                      background = pill(cAccent, cAccent)
+                      minHeight = 0; minimumHeight = dp(46); minWidth = 0; minimumWidth = 0
+                      setPadding(dp(18), 0, dp(18), 0)
+                      stateListAnimator = null
+                      setOnClickListener { submitTyped() }
+                  }
+                  form.addView(sendBtn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(46)).apply { marginStart = dp(8) })
+                  root.addView(form, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+
+                  setContentView(root)
+              }
+
+              private fun applyTexts() {
+                  for ((code, b) in langBtns) {
+                      val on = code == lang
+                      b.setTextColor(if (on) Color.parseColor("#05161C") else cDim)
+                      b.background = pill(if (on) cAccent else cLine, if (on) cAccent else Color.TRANSPARENT)
+                  }
+                  voiceBtn.text = s(if (speakOn) "voiceOn" else "voiceOff")
+                  voiceBtn.setTextColor(if (speakOn) cFg else cDim)
+                  clearBtn.text = s("clear")
+                  setupBtn.text = s("setup")
+                  typed.hint = s("ph")
+                  sendBtn.text = s("send")
+                  setState(state)
+              }
+
+              private fun setState(st: St) {
+                  state = st
+                  statusView.text = when (st) {
+                      St.IDLE -> s("tap")
+                      St.LISTENING -> s("listening")
+                      St.THINKING -> s("thinking")
+                      St.SPEAKING -> s("speaking")
+                  }
+                  val color = if (st == St.SPEAKING) cWarm else cAccent
+                  orb.background = GradientDrawable().apply {
+                      shape = GradientDrawable.OVAL
+                      gradientType = GradientDrawable.RADIAL_GRADIENT
+                      gradientRadius = dp(42).toFloat()
+                      colors = intArrayOf(Color.parseColor("#D4F8FF"), color, Color.parseColor("#0B3442"))
+                      setStroke(dp(2), cLine)
+                  }
+                  (glow.background as GradientDrawable).setColor(color)
+                  orbAnim?.cancel()
+                  orb.scaleX = 1f; orb.scaleY = 1f
+                  val (lo, hi, ms) = when (st) {
+                      St.IDLE -> Triple(1f, 1.04f, 2200L)
+                      St.LISTENING -> Triple(1f, 1.14f, 700L)
+                      St.THINKING -> Triple(0.96f, 1.0f, 600L)
+                      St.SPEAKING -> Triple(0.97f, 1.08f, 500L)
+                  }
+                  orbAnim = android.animation.ValueAnimator.ofFloat(lo, hi).apply {
+                      duration = ms
+                      repeatMode = android.animation.ValueAnimator.REVERSE
+                      repeatCount = android.animation.ValueAnimator.INFINITE
+                      addUpdateListener {
+                          val v = it.animatedValue as Float
+                          orb.scaleX = v; orb.scaleY = v
+                          glow.alpha = if (st == St.IDLE) 0.25f else 0.35f + (v - lo) / (hi - lo + 0.0001f) * 0.3f
+                      }
+                      start()
+                  }
+              }
+
+              // ---------- conversation views ----------
+              private fun scrollDown() { logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) } }
+
+              private fun renderHello() {
+                  log.removeAllViews()
+                  val wrap = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL }
+                  val h = TextView(this).apply {
+                      text = s("hello"); setTextColor(cFg); textSize = 26f
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                  }
+                  wrap.addView(h)
+                  for (idea in ideas()) {
+                      val b = Button(this).apply {
+                          text = idea; isAllCaps = false; textSize = 15f
+                          setTextColor(cFg); background = pill(cLine)
+                          gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                          minHeight = 0; minimumHeight = dp(44)
+                          setPadding(dp(16), 0, dp(16), 0)
+                          stateListAnimator = null
+                          setOnClickListener { ask(idea) }
+                      }
+                      wrap.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(10) })
+                  }
+                  log.addView(wrap, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                  helloView = wrap
+              }
+
+              private fun clearHello() {
+                  helloView?.let { log.removeView(it) }
+                  helloView = null
+              }
+
+              private fun addUser(text: String) {
+                  clearHello()
+                  val tv = TextView(this).apply {
+                      this.text = text; setTextColor(cFg); textSize = 16f
+                      background = GradientDrawable().apply {
+                          setColor(cPanel); setStroke(dp(1), cLine); cornerRadius = dp(16).toFloat()
+                      }
+                      setPadding(dp(14), dp(9), dp(14), dp(9))
+                  }
+                  log.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                      gravity = Gravity.END; topMargin = dp(12); marginStart = dp(48)
+                  })
+                  scrollDown()
+              }
+
+              private fun addBot(text: String, links: List<Pair<String, String>> = emptyList()) {
+                  clearHello()
+                  val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  box.addView(TextView(this).apply {
+                      this.text = "JARVIS"; setTextColor(cAccent); textSize = 12f; letterSpacing = 0.2f
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                  })
+                  box.addView(TextView(this).apply { this.text = text; setTextColor(cFg); textSize = 16f; setLineSpacing(0f, 1.15f) })
+                  for ((label, url) in links) {
+                      val b = Button(this).apply {
+                          this.text = label; isAllCaps = false; textSize = 16f
+                          setTextColor(cAccent); background = pill(cAccent)
+                          typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                          minHeight = 0; minimumHeight = dp(42); minWidth = 0; minimumWidth = 0
+                          setPadding(dp(16), 0, dp(16), 0)
+                          stateListAnimator = null
+                          setOnClickListener {
+                              try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                              catch (_: Exception) { addNote(s("errGen")) }
+                          }
+                      }
+                      box.addView(b, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(42)).apply { topMargin = dp(8) })
+                  }
+                  log.addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                      topMargin = dp(12); marginEnd = dp(32)
+                  })
+                  scrollDown()
+              }
+
+              private fun addNote(text: String) {
+                  clearHello()
+                  val tv = TextView(this).apply { this.text = text; setTextColor(cDim); textSize = 14f; gravity = Gravity.CENTER }
+                  log.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+                  scrollDown()
+              }
+
+              // ---------- setup dialog ----------
+              private fun apiKey(): String {
+                  val saved = prefs.getString("key", "") ?: ""
+                  return if (saved.isNotBlank()) saved.trim() else BuildConfig.GEMINI_API_KEY.trim()
+              }
+
+              private fun showSetup() {
+                  val pad = dp(20)
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, 0) }
+                  col.addView(TextView(this).apply { text = s("setupBody"); setTextColor(cFg); textSize = 15f; setLineSpacing(0f, 1.2f) })
+                  val input = EditText(this).apply {
+                      hint = s("keyHint"); setTextColor(cFg); setHintTextColor(cDim)
+                      inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                      setSingleLine(true)
+                  }
+                  col.addView(input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) })
+                  val dlg = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                      .setTitle(s("setupTitle"))
+                      .setView(col)
+                      .setPositiveButton(s("save"), null)
+                      .setNeutralButton(s("getKey")) { _, _ ->
+                          try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))) } catch (_: Exception) {}
+                      }
+                      .setNegativeButton(s("close"), null)
+                      .create()
+                  dlg.show()
+                  // keep the dialog open after "Get key" and when the key is too short
+                  dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                      try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))) } catch (_: Exception) {}
+                  }
+                  dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                      val k = input.text.toString().trim()
+                      if (k.length < 20) {
+                          input.error = s("keyShort")
+                      } else {
+                          prefs.edit().putString("key", k).apply()
+                          dlg.dismiss()
+                          addNote(s("saved"))
+                      }
+                  }
+              }
+
+              // ---------- talking ----------
+              private fun micLang(): String = if (lang == "en") "en-IN" else "hi-IN"
+
+              private fun onOrbTap() {
+                  when (state) {
+                      St.SPEAKING -> stopSpeaking()
+                      St.THINKING -> {}
+                      St.LISTENING -> try { recognizer?.stopListening() } catch (_: Exception) {}
+                      St.IDLE -> startListening()
+                  }
+              }
+
+              private fun startListening() {
+                  if (recognizer == null) { typed.requestFocus(); return }
+                  if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 11)
+                      return
+                  }
+                  liveView.text = ""
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, micLang())
+                      putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                      putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  }
+                  stopSpeaking()
+                  try {
+                      recognizer?.startListening(i)
+                      setState(St.LISTENING)
+                  } catch (_: Exception) {
+                      setState(St.IDLE)
+                      addNote(s("noMic"))
+                  }
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 11) {
+                      if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startListening()
+                      else addNote(s("micDenied"))
+                  }
+              }
+
+              // RecognitionListener
+              override fun onReadyForSpeech(params: Bundle?) {}
+              override fun onBeginningOfSpeech() {}
+              override fun onRmsChanged(rmsdB: Float) {}
+              override fun onBufferReceived(buffer: ByteArray?) {}
+              override fun onEndOfSpeech() {}
+              override fun onEvent(eventType: Int, params: Bundle?) {}
+
+              override fun onPartialResults(partialResults: Bundle?) {
+                  val l = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                  if (!l.isNullOrEmpty()) liveView.text = l[0]
+              }
+
+              override fun onResults(results: Bundle?) {
+                  val l = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                  liveView.text = ""
+                  val said = if (l.isNullOrEmpty()) "" else l[0]
+                  if (said.isBlank()) { setState(St.IDLE); addNote(s("noHear")) } else { setState(St.IDLE); ask(said) }
+              }
+
+              override fun onError(error: Int) {
+                  liveView.text = ""
+                  setState(St.IDLE)
+                  when (error) {
+                      SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> addNote(s("noHear"))
+                      SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> addNote(s("micDenied"))
+                      SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> addNote(s("errNet"))
+                      else -> addNote(s("noMic"))
+                  }
+              }
+
+              // ---------- speaking ----------
+              private fun stopSpeaking() {
+                  try { tts?.stop() } catch (_: Exception) {}
+                  if (state == St.SPEAKING) setState(St.IDLE)
+              }
+
+              private fun speak(text: String) {
+                  if (!speakOn || !ttsReady) return
+                  val devanagari = text.any { it in 'ऀ'..'ॿ' }
+                  val loc = if (devanagari) Locale("hi", "IN") else Locale("en", "IN")
+                  try {
+                      tts?.language = loc
+                      tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jv")
+                  } catch (_: Exception) {}
+              }
+
+              private fun beep() {
+                  try {
+                      val tg = ToneGenerator(AudioManager.STREAM_ALARM, 90)
+                      tg.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 600)
+                  } catch (_: Exception) {}
+              }
+
+              // ---------- timers ----------
+              private class TimerItem(val view: TextView, var cdt: CountDownTimer)
+              private val timerItems = ArrayList<TimerItem>()
+
+              private fun fmt(ms: Long): String {
+                  val s = (ms + 999) / 1000
+                  val h = s / 3600; val m = (s % 3600) / 60; val r = s % 60
+                  return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, r) else String.format(Locale.US, "%d:%02d", m, r)
+              }
+
+              private fun addTimer(seconds: Long, label: String) {
+                  val sec = seconds.coerceIn(1L, 86400L)
+                  val tv = TextView(this).apply {
+                      setTextColor(cWarm); textSize = 16f
+                      typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+                      background = pill(cWarm)
+                      setPadding(dp(14), dp(6), dp(14), dp(6))
+                  }
+                  lateinit var item: TimerItem
+                  val cdt = object : CountDownTimer(sec * 1000, 500) {
+                      override fun onTick(ms: Long) { tv.text = fmt(ms) + if (label.isNotEmpty()) " · $label" else "" }
+                      override fun onFinish() {
+                          timersBox.removeView(tv); timerItems.remove(item)
+                          beep()
+                          val msg = s("timerDone") + if (label.isNotEmpty()) ": $label" else ""
+                          addBot(msg); speak(msg)
+                      }
+                  }
+                  item = TimerItem(tv, cdt)
+                  tv.setOnClickListener { cdt.cancel(); timersBox.removeView(tv); timerItems.remove(item) }
+                  timerItems.add(item)
+                  timersBox.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(8); topMargin = dp(4) })
+                  cdt.start()
+              }
+
+              // ---------- asking the AI ----------
+              private fun submitTyped() {
+                  val v = typed.text.toString()
+                  typed.setText("")
+                  ask(v)
+              }
+
+              private fun buildPrompt(): String {
+                  val langRule = when (lang) {
+                      "hi" -> "Always reply in Hindi, written in Devanagari script only."
+                      "en" -> "Always reply in English."
+                      else -> "Reply in the language of the user's last message (Hindi or English)."
+                  }
+                  val now = SimpleDateFormat("EEEE, d MMMM yyyy, h:mm a", Locale.ENGLISH).format(Date())
+                  val convo = history.takeLast(12).joinToString("\n") { (r, t) -> (if (r == "user") "User: " else "Jarvis: ") + t }
+                  return listOf(
+                      "You are Jarvis, a warm, quick and practical voice assistant on Ayush's phone.",
+                      "Current date and time: $now.",
+                      langRule,
+                      "Write fully in one language. Never mix Hindi and English words inside one sentence. In Hindi, write brand names in Devanagari.",
+                      "Your reply is read aloud, so keep it to one to three short, natural sentences. No markdown, no lists, no emoji.",
+                      "You cannot reach the phone itself, contacts, calls, live news, weather or the internet. Never pretend you did something you cannot do. When a search or an app would help, give a link action instead.",
+                      "Reply with JSON only, in this exact shape: {\"reply\":\"text to say\",\"actions\":[]}",
+                      "Allowed actions: {\"type\":\"link\",\"label\":\"short button text\",\"url\":\"https://...\"} and {\"type\":\"timer\",\"seconds\":600,\"label\":\"short name\"}.",
+                      "Useful link patterns: https://www.youtube.com/results?search_query=QUERY , https://www.google.com/search?q=QUERY , https://www.google.com/maps/search/?api=1&query=QUERY , https://wa.me/?text=URL_ENCODED_MESSAGE (to send a WhatsApp message the user can pick a contact for). Only https links.",
+                      "Use a timer action when the user asks for a timer or a reminder after some minutes.",
+                      "",
+                      "Conversation so far:",
+                      convo,
+                      "",
+                      "Answer the last user message now as JSON."
+                  ).joinToString("\n")
+              }
+
+              private class AiError(val code: String) : Exception(code)
+
+              private fun callModel(prompt: String): String {
+                  val key = apiKey()
+                  if (key.isEmpty()) throw AiError("nokey")
+                  val body = JSONObject().apply {
+                      put("contents", JSONArray().put(JSONObject().apply {
+                          put("role", "user")
+                          put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+                      }))
+                      put("generationConfig", JSONObject().apply {
+                          put("maxOutputTokens", 1000)
+                          put("temperature", 0.7)
+                          put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                      })
+                  }
+                  val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent")
+                      .openConnection() as HttpURLConnection
+                  try {
+                      conn.requestMethod = "POST"
+                      conn.connectTimeout = 15000
+                      conn.readTimeout = 30000
+                      conn.doOutput = true
+                      conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                      conn.setRequestProperty("x-goog-api-key", key)
+                      conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                      val code = conn.responseCode
+                      if (code == 400 || code == 401 || code == 403) throw AiError("nokey")
+                      if (code == 429) throw AiError("rate")
+                      if (code !in 200..299) throw AiError("http")
+                      val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                      val parts = JSONObject(text).getJSONArray("candidates").getJSONObject(0)
+                          .getJSONObject("content").getJSONArray("parts")
+                      val sb = StringBuilder()
+                      for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text", ""))
+                      return sb.toString()
+                  } finally {
+                      conn.disconnect()
+                  }
+              }
+
+              private class Reply(val text: String, val links: List<Pair<String, String>>, val timers: List<Pair<Long, String>>)
+
+              private fun parseReply(raw: String): Reply {
+                  var s = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                  val a = s.indexOf('{'); val b = s.lastIndexOf('}')
+                  if (a >= 0 && b > a) {
+                      try {
+                          val o = JSONObject(s.substring(a, b + 1))
+                          val reply = o.optString("reply", "")
+                          if (reply.isNotEmpty()) {
+                              val links = ArrayList<Pair<String, String>>()
+                              val timers = ArrayList<Pair<Long, String>>()
+                              val acts = o.optJSONArray("actions") ?: JSONArray()
+                              for (i in 0 until minOf(acts.length(), 4)) {
+                                  val x = acts.optJSONObject(i) ?: continue
+                                  when (x.optString("type")) {
+                                      "link" -> {
+                                          val url = x.optString("url"); val label = x.optString("label")
+                                          if (url.startsWith("https://") && label.isNotEmpty()) links.add(label to url)
+                                      }
+                                      "timer" -> {
+                                          val sec = x.optLong("seconds", 0)
+                                          if (sec > 0) timers.add(sec to x.optString("label", ""))
+                                      }
+                                  }
+                              }
+                              return Reply(reply, links, timers)
+                          }
+                      } catch (_: Exception) {}
+                  }
+                  return Reply(s, emptyList(), emptyList())
+              }
+
+              private fun ask(input: String) {
+                  val text = input.trim()
+                  if (text.isEmpty() || busy) return
+                  if (apiKey().isEmpty()) { showSetup(); return }
+                  busy = true
+                  sendBtn.isEnabled = false
+                  stopSpeaking()
+                  addUser(text)
+                  history.add("user" to text)
+                  setState(St.THINKING)
+                  val prompt = buildPrompt()
+                  Thread {
+                      var reply: Reply? = null
+                      var err: String? = null
+                      try {
+                          reply = parseReply(callModel(prompt))
+                      } catch (e: AiError) {
+                          err = e.code
+                      } catch (e: IOException) {
+                          err = "network"
+                      } catch (e: Exception) {
+                          err = "other"
+                      }
+                      val finalReply: Reply? = reply
+                      val finalErr: String? = err
+                      runOnUiThread {
+                          busy = false
+                          sendBtn.isEnabled = true
+                          setState(St.IDLE)
+                          if (finalReply != null) {
+                              val r = finalReply
+                              val spoken = if (r.text.isNotEmpty()) r.text else s("errGen")
+                              history.add("assistant" to spoken)
+                              r.timers.forEach { addTimer(it.first, it.second) }
+                              addBot(spoken, r.links)
+                              speak(spoken)
+                          } else {
+                              if (history.isNotEmpty()) history.removeAt(history.size - 1)
+                              addNote(
+                                  when (finalErr) {
+                                      "nokey" -> s("errKey")
+                                      "rate" -> s("errRate")
+                                      "network" -> s("errNet")
+                                      else -> s("errGen")
+                                  }
+                              )
+                          }
+                      }
+                  }.start()
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/res/drawable"
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#070D13" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#0B3442" android:pathData="M54,54m-34,0a34,34 0,1 1,68 0a34,34 0,1 1,-68 0" />
+              <path android:fillColor="#3CC8E8" android:pathData="M54,54m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0" />
+              <path android:fillColor="#D4F8FF" android:pathData="M54,54m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0" />
+          </vector>
+          JARVIS_EOF
+          mkdir -p "app/src/main/res/values"
+          cat > app/src/main/res/values/strings.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Jarvis</string>
+          </resources>
+          JARVIS_EOF
+          mkdir -p "app/src/main/res/values"
+          cat > app/src/main/res/values/themes.xml <<'JARVIS_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Jarvis" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#070D13</item>
+                  <item name="android:statusBarColor">#070D13</item>
+                  <item name="android:navigationBarColor">#070D13</item>
+                  <item name="android:colorAccent">#3CC8E8</item>
+                  <item name="android:textColorPrimary">#E2EEF5</item>
+              </style>
+          </resources>
+          JARVIS_EOF
+
+      - name: Generate Gradle wrapper
+        run: |
+          sudo apt-get update && sudo apt-get install -y gradle
+          gradle wrapper --gradle-version 8.7
+          chmod +x gradlew
+
+      - name: Point Gradle to the Android SDK
+        run: echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Accept SDK licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Keep the APK as a download
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish Jarvis.apk in Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk Jarvis.apk
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" || true
+          gh release create latest Jarvis.apk --repo "${{ github.repository }}" --title "Jarvis" --notes "Download Jarvis.apk and install it on your phone."
