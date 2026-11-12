@@ -879,15 +879,19 @@ jobs:
                   }.toString()
                   var last = AiError("http", "no model")
                   val found = try { listModels(key) } catch (e: IOException) { emptyList() }
-                  val candidates = (found + models).distinct().take(6)
+                  // lite models first-class too: they usually have the biggest free quota
+                  val candidates = (found + models).distinct().take(10)
+                  var sawRate = false
                   for (m in candidates) {
                       try {
                           return callOnce(m, key, body)
                       } catch (e: AiError) {
                           if (e.code == "retry") { last = AiError("http", e.detail); continue }
+                          if (e.code == "rate") { sawRate = true; last = AiError("rate", m + " HTTP 429"); continue }
                           throw e
                       }
                   }
+                  if (sawRate) throw AiError("rate", last.detail)
                   throw last
               }
 
@@ -1004,7 +1008,7 @@ jobs:
                               addNote(
                                   when (finalErr) {
                                       "nokey" -> s("errKey")
-                                      "rate" -> s("errRate")
+                                      "rate" -> s("errRate") + if (finalDetail.isNotEmpty()) " [" + finalDetail + "]" else ""
                                       "network" -> s("errNet")
                                       else -> s("errGen") + if (finalDetail.isNotEmpty()) " [" + finalDetail + "]" else ""
                                   }
