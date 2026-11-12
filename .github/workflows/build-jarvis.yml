@@ -817,7 +817,9 @@ jobs:
                   ).joinToString("\n")
               }
 
-              private class AiError(val code: String) : Exception(code)
+              private class AiError(val code: String, val detail: String = "") : Exception(code)
+
+              private val models = listOf("gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash")
 
               private fun callModel(prompt: String): String {
                   val key = apiKey()
@@ -828,31 +830,52 @@ jobs:
                           put("parts", JSONArray().put(JSONObject().put("text", prompt)))
                       }))
                       put("generationConfig", JSONObject().apply {
-                          put("maxOutputTokens", 1000)
+                          put("maxOutputTokens", 4096)
                           put("temperature", 0.7)
-                          put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
                       })
+                  }.toString()
+                  var last = AiError("http", "no model")
+                  for (m in models) {
+                      try {
+                          return callOnce(m, key, body)
+                      } catch (e: AiError) {
+                          if (e.code == "retry") { last = AiError("http", e.detail); continue }
+                          throw e
+                      }
                   }
-                  val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent")
+                  throw last
+              }
+
+              private fun callOnce(model: String, key: String, body: String): String {
+                  val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent")
                       .openConnection() as HttpURLConnection
                   try {
                       conn.requestMethod = "POST"
                       conn.connectTimeout = 15000
-                      conn.readTimeout = 30000
+                      conn.readTimeout = 40000
                       conn.doOutput = true
                       conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                       conn.setRequestProperty("x-goog-api-key", key)
-                      conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                      conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
                       val code = conn.responseCode
-                      if (code == 400 || code == 401 || code == 403) throw AiError("nokey")
+                      if (code in 200..299) {
+                          val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                          try {
+                              val cands = JSONObject(text).optJSONArray("candidates")
+                              val parts = cands?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                              val sb = StringBuilder()
+                              if (parts != null) for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text", ""))
+                              if (sb.isEmpty()) throw AiError("retry", "$model empty")
+                              return sb.toString()
+                          } catch (e: org.json.JSONException) {
+                              throw AiError("retry", "$model parse")
+                          }
+                      }
+                      val errText = try { conn.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: "" } catch (e: Exception) { "" }
                       if (code == 429) throw AiError("rate")
-                      if (code !in 200..299) throw AiError("http")
-                      val text = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                      val parts = JSONObject(text).getJSONArray("candidates").getJSONObject(0)
-                          .getJSONObject("content").getJSONArray("parts")
-                      val sb = StringBuilder()
-                      for (i in 0 until parts.length()) sb.append(parts.getJSONObject(i).optString("text", ""))
-                      return sb.toString()
+                      if (code == 401 || code == 403 || (code == 400 && errText.contains("API key", ignoreCase = true))) throw AiError("nokey")
+                      if (code == 404 || code == 400 || code >= 500) throw AiError("retry", "$model HTTP $code")
+                      throw AiError("http", "HTTP $code")
                   } finally {
                       conn.disconnect()
                   }
@@ -905,15 +928,19 @@ jobs:
                   Thread {
                       var reply: Reply? = null
                       var err: String? = null
+                      var detail = ""
                       try {
                           reply = parseReply(callModel(prompt))
                       } catch (e: AiError) {
                           err = e.code
+                          detail = e.detail
                       } catch (e: IOException) {
                           err = "network"
                       } catch (e: Exception) {
                           err = "other"
+                          detail = e.javaClass.simpleName + " " + (e.message ?: "").take(60)
                       }
+                      val finalDetail = detail
                       val finalReply: Reply? = reply
                       val finalErr: String? = err
                       runOnUiThread {
@@ -934,7 +961,7 @@ jobs:
                                       "nokey" -> s("errKey")
                                       "rate" -> s("errRate")
                                       "network" -> s("errNet")
-                                      else -> s("errGen")
+                                      else -> s("errGen") + if (finalDetail.isNotEmpty()) " [" + finalDetail + "]" else ""
                                   }
                               )
                           }
