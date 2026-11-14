@@ -107,6 +107,10 @@ jobs:
               implementation("androidx.datastore:datastore-preferences:1.1.1")
               implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
               implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+              // offline word spotter for "Hey Jarvis"
+              implementation("net.java.dev.jna:jna:5.13.0@aar")
+              implementation("com.alphacephei:vosk-android:0.3.47")
           }
           JARVIS_EOF
           mkdir -p "app"
@@ -124,6 +128,9 @@ jobs:
               <uses-permission android:name="android.permission.CALL_PHONE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
               <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
               <uses-feature android:name="android.hardware.telephony" android:required="false" />
@@ -165,6 +172,11 @@ jobs:
                   android:label="@string/app_name"
                   android:supportsRtl="true"
                   android:theme="@style/Theme.Jarvis">
+
+                  <service
+                      android:name=".wake.WakeService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
 
                   <activity
                       android:name=".MainActivity"
@@ -251,11 +263,17 @@ jobs:
           import com.jarvis.app.brain.RLang
           import com.jarvis.app.brain.Router
           import com.jarvis.app.brain.tr
+          import com.jarvis.app.data.K
           import com.jarvis.app.data.Note
           import com.jarvis.app.data.Prefs
           import com.jarvis.app.data.PrefsRepo
           import com.jarvis.app.voice.Listener
           import com.jarvis.app.voice.Speaker
+          import com.jarvis.app.wake.WakeBus
+          import com.jarvis.app.wake.WakeControl
+          import com.jarvis.app.wake.WakeModel
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
           import kotlinx.coroutines.Job
           import kotlinx.coroutines.delay
           import kotlinx.coroutines.flow.MutableStateFlow
@@ -303,6 +321,10 @@ jobs:
               private val _crash = MutableStateFlow<String?>(null)
               val crash: StateFlow<String?> = _crash.asStateFlow()
 
+              /** "" = nothing going on, "12" = downloading the voice model (percent), "ERROR" = download failed. */
+              private val _wakeStatus = MutableStateFlow("")
+              val wakeStatus: StateFlow<String> = _wakeStatus.asStateFlow()
+
               private var nextId = 1L
               private var work: Job? = null
               private var callJob: Job? = null
@@ -319,6 +341,9 @@ jobs:
               }
 
               init {
+                  viewModelScope.launch {
+                      _orb.collect { WakeBus.setBusy(it != OrbState.IDLE) }
+                  }
                   val f = File(app.filesDir, JarvisApplication.CRASH_FILE)
                   if (f.exists()) {
                       _crash.value = try {
@@ -391,12 +416,18 @@ jobs:
                   _partial.value = ""
                   _orb.value = OrbState.LISTENING
                   val tag = if (prefs.value.language == "ENGLISH") "en-IN" else "hi-IN"
-                  try {
-                      listener.start(tag)
-                  } catch (e: Exception) {
-                      _orb.value = OrbState.IDLE
-                      return false
-                  }
+                  // if the background "Hey Jarvis" listener is running, give it a moment to let go of the microphone
+                  val delayMs = if (WakeBus.active) 450L else 0L
+                  WakeBus.setBusy(true)
+                  main.postDelayed({
+                      if (_orb.value == OrbState.LISTENING) {
+                          try {
+                              listener.start(tag)
+                          } catch (e: Exception) {
+                              _orb.value = OrbState.IDLE
+                          }
+                      }
+                  }, delayMs)
                   return true
               }
 
@@ -581,6 +612,38 @@ jobs:
 
               fun <T> set(key: Preferences.Key<T>, value: T) {
                   viewModelScope.launch { repo.set(key, value) }
+              }
+
+              /** Switch the "Hey Jarvis" listener on or off. The first time it downloads a small voice model. */
+              fun setWake(enabled: Boolean) {
+                  val app = getApplication<Application>()
+                  if (!enabled) {
+                      viewModelScope.launch { repo.set(K.wakeWord, false) }
+                      WakeControl.stop(app)
+                      _wakeStatus.value = ""
+                      return
+                  }
+                  viewModelScope.launch {
+                      if (!WakeModel.ready(app)) {
+                          _wakeStatus.value = "0"
+                          val ok = withContext(Dispatchers.IO) {
+                              WakeModel.download(app) { pct -> _wakeStatus.value = pct.toString() }
+                          }
+                          if (!ok) {
+                              _wakeStatus.value = "ERROR"
+                              return@launch
+                          }
+                          _wakeStatus.value = ""
+                      }
+                      repo.set(K.wakeWord, true)
+                      WakeControl.start(app)
+                  }
+              }
+
+              /** Called when the app opens: bring the listener back if it was switched on. */
+              fun resumeWake() {
+                  val app = getApplication<Application>()
+                  if (prefs.value.wakeWord && WakeModel.ready(app) && !WakeBus.active) WakeControl.start(app)
               }
 
               fun addNote(text: String) {
@@ -1976,6 +2039,7 @@ jobs:
               val skillNotes = booleanPreferencesKey("skill_notes")
               val skillWeb = booleanPreferencesKey("skill_web")
               val notes = stringPreferencesKey("notes_json")
+              val wakeWord = booleanPreferencesKey("wake_word")
           }
 
           data class Prefs(
@@ -1992,7 +2056,8 @@ jobs:
               val skillMusic: Boolean = true,
               val skillDevice: Boolean = true,
               val skillNotes: Boolean = true,
-              val skillWeb: Boolean = true
+              val skillWeb: Boolean = true,
+              val wakeWord: Boolean = false
           )
 
           @Serializable
@@ -2016,7 +2081,8 @@ jobs:
                       skillMusic = p[K.skillMusic] ?: d.skillMusic,
                       skillDevice = p[K.skillDevice] ?: d.skillDevice,
                       skillNotes = p[K.skillNotes] ?: d.skillNotes,
-                      skillWeb = p[K.skillWeb] ?: d.skillWeb
+                      skillWeb = p[K.skillWeb] ?: d.skillWeb,
+                      wakeWord = p[K.wakeWord] ?: d.wakeWord
                   )
               }
 
@@ -2064,6 +2130,8 @@ jobs:
           import androidx.compose.foundation.layout.navigationBarsPadding
           import androidx.compose.foundation.layout.padding
           import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.collectAsState
           import androidx.compose.runtime.getValue
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
@@ -2074,6 +2142,7 @@ jobs:
           import androidx.navigation.compose.currentBackStackEntryAsState
           import androidx.navigation.compose.rememberNavController
           import com.jarvis.app.JarvisViewModel
+          import com.jarvis.app.wake.WakeBus
 
           private const val SPLASH = "splash"
           private const val HOME = "home"
@@ -2095,6 +2164,32 @@ jobs:
                   TASKS -> "TASKS"
                   SKILLS -> "SKILLS"
                   else -> null
+              }
+
+              val prefs by vm.prefs.collectAsState()
+              val ready = route != null && route != SPLASH
+
+              // bring the "Hey Jarvis" listener back when the app opens
+              LaunchedEffect(prefs.wakeWord) {
+                  if (prefs.wakeWord) vm.resumeWake()
+              }
+
+              // "Hey Jarvis" was heard: open the chat and start listening
+              LaunchedEffect(ready) {
+                  if (ready) {
+                      if (WakeBus.pending) {
+                          WakeBus.pending = false
+                          vm.startListening()
+                          goTab(nav, CHAT)
+                      }
+                      WakeBus.events.collect {
+                          if (WakeBus.pending) {
+                              WakeBus.pending = false
+                              vm.startListening()
+                              goTab(nav, CHAT)
+                          }
+                      }
+                  }
               }
 
               JarvisBackground {
@@ -2986,7 +3081,7 @@ jobs:
                   OrbState.IDLE -> pick(hindi, "ऑनलाइन", "ONLINE")
               }
               val caption = when (orb) {
-                  OrbState.IDLE -> pick(hindi, "बोलने के लिए छुएँ · वेक वर्ड जल्द", "TAP TO SPEAK · WAKE WORD SOON")
+                  OrbState.IDLE -> if (prefs.wakeWord) pick(hindi, "छुएँ या कहें \"Hey Jarvis\"", "TAP TO SPEAK · OR SAY HEY JARVIS") else pick(hindi, "बोलने के लिए छुएँ", "TAP TO SPEAK")
                   OrbState.LISTENING -> if (partial.isNotBlank()) partial else pick(hindi, "सुन रहा हूँ…", "LISTENING…")
                   OrbState.THINKING -> pick(hindi, "सोच रहा हूँ…", "THINKING…")
                   OrbState.SPEAKING -> pick(hindi, "बोल रहा हूँ… रोकने के लिए छुएँ", "SPEAKING… TAP TO STOP")
@@ -3152,6 +3247,22 @@ jobs:
                       if (event == Lifecycle.Event.ON_RESUME) {
                           state.value = ContextCompat.checkSelfPermission(ctx, permission) == PackageManager.PERMISSION_GRANTED
                       }
+                  }
+                  owner.lifecycle.addObserver(observer)
+                  onDispose { owner.lifecycle.removeObserver(observer) }
+              }
+              return state
+          }
+
+          /** True while "display over other apps" is allowed. Re-checks when you come back to the app. */
+          @Composable
+          fun rememberOverlayGranted(): State<Boolean> {
+              val ctx = LocalContext.current
+              val state = remember { mutableStateOf(android.provider.Settings.canDrawOverlays(ctx)) }
+              val owner = LocalLifecycleOwner.current
+              DisposableEffect(owner) {
+                  val observer = LifecycleEventObserver { _, event ->
+                      if (event == Lifecycle.Event.ON_RESUME) state.value = android.provider.Settings.canDrawOverlays(ctx)
                   }
                   owner.lifecycle.addObserver(observer)
                   onDispose { owner.lifecycle.removeObserver(observer) }
@@ -3431,6 +3542,7 @@ jobs:
               val mic by rememberGranted(Manifest.permission.RECORD_AUDIO)
               val contacts by rememberGranted(Manifest.permission.READ_CONTACTS)
               val phone by rememberGranted(Manifest.permission.CALL_PHONE)
+              val overlay by rememberOverlayGranted()
               val notif by rememberGranted(
                   if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.INTERNET
               )
@@ -3469,6 +3581,19 @@ jobs:
                           pick(hindi, "आगे आने वाली याद दिलाने की सुविधा के लिए।", "For reminders in a later version."),
                           notif, hindi
                       ) { launcher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                  }
+
+                  PermissionCard(
+                      pick(hindi, "दूसरे ऐप के ऊपर दिखाना", "DISPLAY OVER OTHER APPS"),
+                      pick(hindi, "\"Hey Jarvis\" कहने पर ऐप अपने आप खुल सके, इसके लिए।", "So the app can open by itself when you say \"Hey Jarvis\"."),
+                      overlay, hindi
+                  ) {
+                      try {
+                          val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.fromParts("package", ctx.packageName, null))
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          ctx.startActivity(i)
+                      } catch (e: Exception) {
+                      }
                   }
 
                   Text(
@@ -3517,7 +3642,13 @@ jobs:
           cat > app/src/main/java/com/jarvis/app/ui/SettingsScreen.kt <<'JARVIS_EOF'
           package com.jarvis.app.ui
 
+          import android.Manifest
+          import android.content.pm.PackageManager
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.result.contract.ActivityResultContracts
           import androidx.compose.foundation.background
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.core.content.ContextCompat
           import androidx.compose.foundation.border
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Box
@@ -3560,6 +3691,11 @@ jobs:
               val prefs by vm.prefs.collectAsState()
               val hindi = prefs.language == "HINDI"
               val uri = LocalUriHandler.current
+              val wakeStatus by vm.wakeStatus.collectAsState()
+              val ctx = LocalContext.current
+              val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+                  if (granted) vm.setWake(true)
+              }
               var keyText by remember { mutableStateOf(prefs.apiKey) }
               var nameText by remember { mutableStateOf(prefs.userName) }
               var keySaved by remember { mutableStateOf(false) }
@@ -3622,8 +3758,22 @@ jobs:
                   SectionLabel(pick(hindi, "आवाज़", "VOICE"))
                   SettingRow(
                       pick(hindi, "\"Hey Jarvis\" वेक वर्ड", "\"Hey Jarvis\" wake word"),
-                      pick(hindi, "जल्द आ रहा है", "Coming soon")
-                  ) { JSwitch(checked = false, onChange = {}, enabled = false) }
+                      when {
+                          wakeStatus == "ERROR" -> pick(hindi, "डाउनलोड नहीं हो पाया। इंटरनेट जाँचिए।", "Download failed. Check your internet.")
+                          wakeStatus.isNotEmpty() -> pick(hindi, "आवाज़ मॉडल डाउनलोड हो रहा है: $wakeStatus%", "Downloading the voice model: $wakeStatus%")
+                          else -> pick(hindi, "पहली बार लगभग 40 MB डाउनलोड होगा", "First time downloads about 40 MB")
+                      }
+                  ) {
+                      JSwitch(prefs.wakeWord || wakeStatus.isNotEmpty() && wakeStatus != "ERROR") { on ->
+                          if (!on) {
+                              vm.setWake(false)
+                          } else if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                              vm.setWake(true)
+                          } else {
+                              micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                          }
+                      }
+                  }
                   SettingRow(
                       pick(hindi, "जवाब बोलकर सुनाओ", "Speak answers aloud"),
                       null
@@ -4254,6 +4404,363 @@ jobs:
               }
           }
           JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/wake"
+          cat > app/src/main/java/com/jarvis/app/wake/WakeBus.kt <<'JARVIS_EOF'
+          package com.jarvis.app.wake
+
+          import android.content.Context
+          import android.content.Intent
+          import androidx.core.content.ContextCompat
+          import kotlinx.coroutines.flow.MutableSharedFlow
+
+          /**
+           * The small message board between the background listener (WakeService) and the app screens.
+           * pending = "Hey Jarvis was heard, the app should start listening now".
+           * busy = "the app itself is using the microphone or speaker, so the wake listener must stay quiet".
+           */
+          object WakeBus {
+              val events = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+              @Volatile var pending = false
+              @Volatile var busy = false
+              @Volatile var active = false          // the background listener is running
+
+              /** Set by the service (main thread) so it can release the microphone at once. */
+              var busyListener: (() -> Unit)? = null
+
+              fun setBusy(b: Boolean) {
+                  busy = b
+                  if (b) busyListener?.invoke()
+              }
+          }
+
+          object WakeControl {
+              fun start(ctx: Context) {
+                  try {
+                      ContextCompat.startForegroundService(ctx, Intent(ctx, WakeService::class.java))
+                  } catch (e: Exception) {
+                      // Android refuses this when the app is in the background. It is tried again next time the app opens.
+                  }
+              }
+
+              fun stop(ctx: Context) {
+                  try {
+                      ctx.stopService(Intent(ctx, WakeService::class.java))
+                  } catch (e: Exception) {
+                  }
+                  WakeBus.active = false
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/wake"
+          cat > app/src/main/java/com/jarvis/app/wake/WakeModel.kt <<'JARVIS_EOF'
+          package com.jarvis.app.wake
+
+          import android.content.Context
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.zip.ZipInputStream
+
+          /**
+           * The small offline voice model (about 40 MB) used only to catch "Hey Jarvis".
+           * It is downloaded once, the first time you switch the wake word on, and then kept on the phone.
+           */
+          object WakeModel {
+
+              private val urls = listOf(
+                  "https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip",
+                  "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
+              )
+
+              fun dir(ctx: Context): File = File(ctx.filesDir, "vosk-model")
+
+              fun ready(ctx: Context): Boolean = File(dir(ctx), "ready.flag").exists()
+
+              /** Blocking. Call from a background thread. Returns true when the model is ready. */
+              fun download(ctx: Context, onProgress: (Int) -> Unit): Boolean {
+                  for (u in urls) {
+                      if (tryOne(ctx, u, onProgress)) return true
+                  }
+                  return false
+              }
+
+              private fun tryOne(ctx: Context, url: String, onProgress: (Int) -> Unit): Boolean {
+                  val target = dir(ctx)
+                  try {
+                      target.deleteRecursively()
+                      target.mkdirs()
+                      val conn = URL(url).openConnection() as HttpURLConnection
+                      conn.connectTimeout = 15000
+                      conn.readTimeout = 30000
+                      conn.instanceFollowRedirects = true
+                      if (conn.responseCode != 200) return false
+                      val total = conn.contentLengthLong
+                      val counter = CountingStream(conn.inputStream, total, onProgress)
+                      ZipInputStream(counter).use { zip ->
+                          var entry = zip.nextEntry
+                          val root = target.canonicalPath
+                          while (entry != null) {
+                              // drop the top folder name inside the zip
+                              val name = entry.name.substringAfter('/', "")
+                              if (name.isNotEmpty() && !entry.isDirectory) {
+                                  val out = File(target, name)
+                                  if (!out.canonicalPath.startsWith(root)) return false
+                                  out.parentFile?.mkdirs()
+                                  FileOutputStream(out).use { f -> zip.copyTo(f) }
+                              }
+                              entry = zip.nextEntry
+                          }
+                      }
+                      if (!File(target, "am").exists()) return false
+                      File(target, "ready.flag").writeText("ok")
+                      onProgress(100)
+                      return true
+                  } catch (e: Exception) {
+                      target.deleteRecursively()
+                      return false
+                  }
+              }
+
+              private class CountingStream(
+                  private val inner: java.io.InputStream,
+                  private val total: Long,
+                  private val onProgress: (Int) -> Unit
+              ) : java.io.InputStream() {
+                  private var read = 0L
+                  private var lastPct = -1
+
+                  private fun bump(n: Int) {
+                      if (n > 0 && total > 0) {
+                          read += n
+                          val pct = ((read * 100) / total).toInt().coerceIn(0, 99)
+                          if (pct != lastPct) {
+                              lastPct = pct
+                              onProgress(pct)
+                          }
+                      }
+                  }
+
+                  override fun read(): Int {
+                      val b = inner.read()
+                      if (b >= 0) bump(1)
+                      return b
+                  }
+
+                  override fun read(b: ByteArray, off: Int, len: Int): Int {
+                      val n = inner.read(b, off, len)
+                      bump(n)
+                      return n
+                  }
+
+                  override fun close() {
+                      inner.close()
+                  }
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/wake"
+          cat > app/src/main/java/com/jarvis/app/wake/WakeService.kt <<'JARVIS_EOF'
+          package com.jarvis.app.wake
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import com.jarvis.app.MainActivity
+          import com.jarvis.app.R
+          import org.vosk.Model
+          import org.vosk.Recognizer
+          import org.vosk.android.RecognitionListener
+          import org.vosk.android.SpeechService
+
+          /**
+           * Listens quietly for "Hey Jarvis" while the app is in the background.
+           * It lets go of the microphone whenever the app itself is talking or listening.
+           */
+          class WakeService : Service() {
+
+              private val main = Handler(Looper.getMainLooper())
+              private var model: Model? = null
+              private var speech: SpeechService? = null
+              private var running = false
+              private var cooldownUntil = 0L
+              private var idleSince = 0L
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      check()
+                      main.postDelayed(this, 500)
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  WakeBus.active = true
+                  WakeBus.busyListener = { stopListening() }
+                  try {
+                      goForeground()
+                  } catch (e: Exception) {
+                      WakeBus.active = false
+                      stopSelf()
+                      return
+                  }
+                  Thread {
+                      try {
+                          val m = Model(WakeModel.dir(this).absolutePath)
+                          main.post { model = m }
+                      } catch (e: Throwable) {
+                          main.post { stopSelf() }
+                      }
+                  }.start()
+                  main.postDelayed(tick, 500)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+              override fun onDestroy() {
+                  main.removeCallbacks(tick)
+                  WakeBus.busyListener = null
+                  WakeBus.active = false
+                  stopListening()
+                  try {
+                      model?.close()
+                  } catch (e: Throwable) {
+                  }
+                  model = null
+                  super.onDestroy()
+              }
+
+              // ---------------------------------------------------------------- the listening loop
+
+              private fun check() {
+                  val m = model ?: return
+                  val now = System.currentTimeMillis()
+                  if (WakeBus.busy || now < cooldownUntil) {
+                      idleSince = 0L
+                      if (running) stopListening()
+                      return
+                  }
+                  if (idleSince == 0L) idleSince = now
+                  // wait a moment after the app goes quiet, so Jarvis's own voice is not picked up
+                  if (!running && now - idleSince > 1200) startListening(m)
+              }
+
+              private fun startListening(m: Model) {
+                  try {
+                      val rec = Recognizer(m, 16000f, GRAMMAR)
+                      val s = SpeechService(rec, 16000f)
+                      s.startListening(object : RecognitionListener {
+                          override fun onPartialResult(hypothesis: String?) {
+                              if (heard(hypothesis)) onWake()
+                          }
+
+                          override fun onResult(hypothesis: String?) {
+                              if (heard(hypothesis)) onWake()
+                          }
+
+                          override fun onFinalResult(hypothesis: String?) {}
+
+                          override fun onError(exception: Exception?) {
+                              stopListening()
+                              cooldownUntil = System.currentTimeMillis() + 5000
+                          }
+
+                          override fun onTimeout() {}
+                      })
+                      speech = s
+                      running = true
+                  } catch (e: Throwable) {
+                      running = false
+                      cooldownUntil = System.currentTimeMillis() + 5000
+                  }
+              }
+
+              private fun stopListening() {
+                  try {
+                      speech?.stop()
+                      speech?.shutdown()
+                  } catch (e: Throwable) {
+                  }
+                  speech = null
+                  running = false
+              }
+
+              private fun heard(h: String?): Boolean {
+                  if (h == null) return false
+                  val t = h.lowercase()
+                  return t.contains("jarvis") || t.contains("jar vis") || t.contains("hey travis")
+              }
+
+              private fun onWake() {
+                  stopListening()
+                  cooldownUntil = System.currentTimeMillis() + 3000
+                  WakeBus.pending = true
+                  WakeBus.events.tryEmit(Unit)
+                  val open = Intent(this, MainActivity::class.java)
+                      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                  try {
+                      startActivity(open)
+                  } catch (e: Exception) {
+                  }
+                  // Android may block opening the app from the background, so also leave a tap-to-talk notification.
+                  try {
+                      val pi = PendingIntent.getActivity(this, 1, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                      val n = Notification.Builder(this, CH_ALERT)
+                          .setSmallIcon(R.drawable.ic_launcher)
+                          .setContentTitle("Jarvis")
+                          .setContentText("I heard you. Tap to talk.")
+                          .setContentIntent(pi)
+                          .setAutoCancel(true)
+                          .setCategory(Notification.CATEGORY_CALL)
+                          .build()
+                      val nm = getSystemService(NotificationManager::class.java)
+                      nm.notify(2, n)
+                  } catch (e: Exception) {
+                  }
+              }
+
+              // ---------------------------------------------------------------- the always-on notification
+
+              private fun goForeground() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel(CH_LISTEN, "Wake word", NotificationManager.IMPORTANCE_LOW))
+                  nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Jarvis heard you", NotificationManager.IMPORTANCE_HIGH))
+                  val pi = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  val n = Notification.Builder(this, CH_LISTEN)
+                      .setSmallIcon(R.drawable.ic_launcher)
+                      .setContentTitle("Jarvis is listening")
+                      .setContentText("Say \"Hey Jarvis\"")
+                      .setContentIntent(pi)
+                      .setOngoing(true)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  } else {
+                      startForeground(1, n)
+                  }
+              }
+
+              companion object {
+                  private const val CH_LISTEN = "wake_listen"
+                  private const val CH_ALERT = "wake_alert"
+                  private const val GRAMMAR = "[\"hey jarvis\", \"jarvis\", \"hey travis\", \"[unk]\"]"
+              }
+          }
+          JARVIS_EOF
           mkdir -p "app/src/main/res/drawable"
           cat > app/src/main/res/drawable/ic_launcher.xml <<'JARVIS_EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -4271,7 +4778,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIALDI92oC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAJsi+GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -4437,7 +4944,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIALDI92oC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAJsi+GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -4627,7 +5134,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIALDI92oC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAJsi+GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -4825,7 +5332,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIALDI92oC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAJsi+GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5046,7 +5553,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIALDI92oC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAJsi+GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
