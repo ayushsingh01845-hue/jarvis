@@ -577,7 +577,7 @@ jobs:
               private fun finish(reply: String, card: ActionCard?, pending: com.jarvis.app.brain.PendingCall?, p: Prefs) {
                   addMessage(false, reply, card)
                   var speaking = false
-                  if (p.speakAloud) speaking = speaker.speak(reply, p.speed)
+                  if (p.speakAloud) speaking = speaker.speak(reply, p.speed, p.maleVoice)
                   if (!speaking) _orb.value = OrbState.IDLE
                   // else: the Speaker callback switches the orb to SPEAKING and back to IDLE
 
@@ -1377,6 +1377,9 @@ jobs:
 
               private var modelCache: List<String>? = null
 
+              // The model that answered last time. It is tried first, so later answers are quick.
+              @Volatile private var goodModel: String? = null
+
               /** history = earlier messages: (true = you, false = Jarvis, text) */
               suspend fun ask(
                   key: String,
@@ -1386,21 +1389,31 @@ jobs:
                   text: String
               ): Reply = withContext(Dispatchers.IO) {
                   if (key.isBlank()) throw GeminiError("nokey")
-                  val body = buildBody(userName, languageSetting, history, text)
+                  val body = buildBody(userName, languageSetting, history, text, false)
+                  val bodyNoThink = buildBody(userName, languageSetting, history, text, true)
 
-                  val found = try {
-                      listModels(key)
-                  } catch (e: IOException) {
+                  val good = goodModel
+                  val found = if (good != null) {
                       emptyList()
+                  } else {
+                      try {
+                          listModels(key)
+                      } catch (e: IOException) {
+                          emptyList()
+                      }
                   }
-                  val candidates = (found + fallbackModels).distinct().take(10)
+                  val candidates = (listOfNotNull(good) + found + fallbackModels).distinct().take(10)
 
                   var last = GeminiError("http", "no model")
                   var sawRate = false
                   for (m in candidates) {
                       try {
-                          return@withContext parseReply(callOnce(m, key, body))
+                          // 2.5 models "think" before answering, which is slow; switch that off
+                          val reply = parseReply(callOnce(m, key, if (m.contains("2.5")) bodyNoThink else body))
+                          goodModel = m
+                          return@withContext reply
                       } catch (e: GeminiError) {
+                          if (m == good) goodModel = null
                           when (e.code) {
                               "retry" -> last = GeminiError("http", e.detail)
                               "rate" -> {
@@ -1439,7 +1452,8 @@ jobs:
                   userName: String,
                   languageSetting: String,
                   history: List<Pair<Boolean, String>>,
-                  text: String
+                  text: String,
+                  noThink: Boolean
               ): String {
                   // Gemini wants turns that start with "user" and alternate; merge neighbours of the same role.
                   val turns = ArrayList<Pair<String, String>>()
@@ -1466,8 +1480,14 @@ jobs:
                           JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt(userName, languageSetting))))
                       )
                       .put("contents", contents)
-                      .put("generationConfig", JSONObject().put("maxOutputTokens", 4096).put("temperature", 0.6))
+                      .put("generationConfig", config(noThink))
                       .toString()
+              }
+
+              private fun config(noThink: Boolean): JSONObject {
+                  val c = JSONObject().put("maxOutputTokens", 1024).put("temperature", 0.6)
+                  if (noThink) c.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                  return c
               }
 
               /** Asks Google which models this key can use right now, and prefers fast, stable ones. */
@@ -1518,7 +1538,7 @@ jobs:
                   try {
                       conn.requestMethod = "POST"
                       conn.connectTimeout = 15000
-                      conn.readTimeout = 40000
+                      conn.readTimeout = 25000
                       conn.doOutput = true
                       conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                       conn.setRequestProperty("x-goog-api-key", key)
@@ -2040,6 +2060,7 @@ jobs:
               val skillWeb = booleanPreferencesKey("skill_web")
               val notes = stringPreferencesKey("notes_json")
               val wakeWord = booleanPreferencesKey("wake_word")
+              val maleVoice = booleanPreferencesKey("male_voice")
           }
 
           data class Prefs(
@@ -2057,7 +2078,8 @@ jobs:
               val skillDevice: Boolean = true,
               val skillNotes: Boolean = true,
               val skillWeb: Boolean = true,
-              val wakeWord: Boolean = false
+              val wakeWord: Boolean = false,
+              val maleVoice: Boolean = true
           )
 
           @Serializable
@@ -2082,7 +2104,8 @@ jobs:
                       skillDevice = p[K.skillDevice] ?: d.skillDevice,
                       skillNotes = p[K.skillNotes] ?: d.skillNotes,
                       skillWeb = p[K.skillWeb] ?: d.skillWeb,
-                      wakeWord = p[K.wakeWord] ?: d.wakeWord
+                      wakeWord = p[K.wakeWord] ?: d.wakeWord,
+                      maleVoice = p[K.maleVoice] ?: d.maleVoice
                   )
               }
 
@@ -3779,6 +3802,10 @@ jobs:
                       null
                   ) { JSwitch(prefs.speakAloud) { vm.set(K.speakAloud, it) } }
                   SettingRow(
+                      pick(hindi, "पुरुष की आवाज़", "Male voice"),
+                      pick(hindi, "बंद करने पर फ़ोन की सामान्य आवाज़ आएगी", "When off, the phone's normal voice is used")
+                  ) { JSwitch(prefs.maleVoice) { vm.set(K.maleVoice, it) } }
+                  SettingRow(
                       pick(hindi, "बोलने की रफ़्तार", "Speaking speed"),
                       null,
                       divider = false
@@ -4339,6 +4366,7 @@ jobs:
           import android.content.Context
           import android.speech.tts.TextToSpeech
           import android.speech.tts.UtteranceProgressListener
+          import android.speech.tts.Voice
           import java.util.Locale
 
           /**
@@ -4374,7 +4402,7 @@ jobs:
               }
 
               /** Returns true if speech was started. */
-              fun speak(text: String, rate: Float): Boolean {
+              fun speak(text: String, rate: Float, male: Boolean = false): Boolean {
                   val engine = tts
                   if (!ready || engine == null || text.isBlank()) return false
                   val hindi = text.any { it in 'ऀ'..'ॿ' }
@@ -4383,8 +4411,41 @@ jobs:
                   if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                       engine.setLanguage(Locale.ENGLISH)
                   }
+                  var maleFound = false
+                  if (male) {
+                      val v = pickMaleVoice(engine, wanted)
+                      if (v != null) {
+                          try {
+                              engine.setVoice(v)
+                              maleFound = true
+                          } catch (e: Exception) {
+                          }
+                      }
+                  }
+                  // no male voice installed: a lower pitch is the next best thing
+                  engine.setPitch(if (male && !maleFound) 0.78f else 1.0f)
                   engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
                   return engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis") == TextToSpeech.SUCCESS
+              }
+
+              /** Looks for a male voice of this language among the voices installed on the phone. */
+              private fun pickMaleVoice(engine: TextToSpeech, wanted: Locale): Voice? {
+                  val all = try {
+                      engine.voices
+                  } catch (e: Exception) {
+                      null
+                  } ?: return null
+                  val maleCodes = setOf("enb", "end", "hib", "hic")
+                  val candidates = all.filter { v ->
+                      if (v.locale.language != wanted.language) return@filter false
+                      val name = v.name.lowercase()
+                      val code = name.substringAfter("-x-", "").substringBefore('-')
+                      (name.contains("male") && !name.contains("female")) || code in maleCodes
+                  }
+                  if (candidates.isEmpty()) return null
+                  return candidates.sortedWith(
+                      compareBy<Voice>({ it.locale.country != wanted.country }, { it.isNetworkConnectionRequired })
+                  ).first()
               }
 
               fun stop() {
@@ -4778,7 +4839,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAHg/+GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAE9I+GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -4944,7 +5005,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAHg/+GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAE9I+GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -5134,7 +5195,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAHg/+GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAE9I+GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -5332,7 +5393,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAHg/+GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAE9I+GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5553,7 +5614,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAHg/+GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAE9I+GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
