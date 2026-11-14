@@ -325,6 +325,9 @@ jobs:
               private val _wakeStatus = MutableStateFlow("")
               val wakeStatus: StateFlow<String> = _wakeStatus.asStateFlow()
 
+              private var retried = false
+              private var lastTag = "hi-IN"
+
               private var nextId = 1L
               private var work: Job? = null
               private var callJob: Job? = null
@@ -362,7 +365,19 @@ jobs:
                   listener.onError = { code ->
                       _partial.value = ""
                       _level.value = 0f
-                      when (code) {
+                      if ((code == 11 || code == 8) && !retried && _orb.value == OrbState.LISTENING) {
+                          // the phone's speech service dropped out for a moment: try once more
+                          retried = true
+                          main.postDelayed({
+                              if (_orb.value == OrbState.LISTENING) {
+                                  try {
+                                      listener.start(lastTag)
+                                  } catch (e: Exception) {
+                                      _orb.value = OrbState.IDLE
+                                  }
+                              }
+                          }, 600)
+                      } else when (code) {
                           SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> problem(currentLang(), noHear = true)
                           SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> micDenied()
                           SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT, SpeechRecognizer.ERROR_SERVER ->
@@ -416,6 +431,8 @@ jobs:
                   _partial.value = ""
                   _orb.value = OrbState.LISTENING
                   val tag = if (prefs.value.language == "ENGLISH") "en-IN" else "hi-IN"
+                  lastTag = tag
+                  retried = false
                   // if the background "Hey Jarvis" listener is running, give it a moment to let go of the microphone
                   val delayMs = if (WakeBus.active) 450L else 0L
                   WakeBus.markBusy(true)
@@ -1088,7 +1105,20 @@ jobs:
               }
 
               private fun music(a: Act.Music, l: RLang): Outcome {
-                  val q = a.query.trim()
+                  val raw = a.query.trim()
+                  if (raw.startsWith("yt:")) {
+                      val topic = raw.removePrefix("yt:").trim()
+                      val opened = start(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=" + Uri.encode(topic))))
+                      return if (opened) {
+                          Outcome(
+                              reply = tr(l, "यूट्यूब पर खोज रहा हूँ।", "YouTube par dhoondh raha hoon.", "Searching YouTube."),
+                              card = ActionCard("YOUTUBE", topic.uppercase(), "")
+                          )
+                      } else {
+                          Outcome(tr(l, "यूट्यूब नहीं खुल पाया।", "YouTube nahi khul paya.", "I couldn't open YouTube."), ok = false)
+                      }
+                  }
+                  val q = raw
                   var ok = false
                   if (q.isNotBlank()) {
                       ok = start(Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
@@ -1721,7 +1751,13 @@ jobs:
               )
               val timer = Norm.set("timer", "टाइमर", "टाईमर", "countdown", "काउंटडाउन")
               val reminder = Norm.set("remind", "reminder", "रिमाइंडर", "रिमाइन्डर", "dilana", "dila", "दिलाना", "दिला")
-              val call = Norm.set("call", "कॉल", "काल", "phone", "फोन", "dial", "dialer", "डायल")
+              val call = Norm.set("call", "कॉल", "काल", "dial", "dialer", "डायल")
+              /** "phone" alone is not a call: "mere phone me ..." just talks about the phone. */
+              val phoneWord = Norm.set("phone", "फोन")
+              val phoneVerbs = Norm.set("lagao", "laga", "लगाओ", "लगा", "kar", "karo", "करो", "कर", "milao", "मिलाओ")
+              val inWords = Norm.set("me", "mein", "main", "में", "मे", "mai", "andar", "अंदर")
+              val neg = Norm.set("nahi", "nahin", "nhi", "नहीं", "नही", "mat", "मत", "not", "dont", "don't", "nahi")
+              val yt = Norm.set("youtube", "यूट्यूब", "यूट्यब", "utube", "yt", "युट्यूब", "यूटयूब")
               val sms = Norm.set("message", "msg", "sms", "मैसेज", "मेसेज", "संदेश", "sandesh", "whatsapp text")
               val torch = Norm.set("torch", "tortch", "flashlight", "flash", "टॉर्च", "टार्च", "फ्लैशलाइट", "फ्लैश", "light", "लाइट", "batti", "बत्ती")
               val off = Norm.set("off", "band", "बंद", "bujha", "bujhao", "बुझा", "बुझाओ", "disable", "stop")
@@ -1888,8 +1924,9 @@ jobs:
                       val name = head.filter { it !in P.sms && it !in P.filler }.joinToString(" ")
                       return Act.Sms(name, text)
                   }
-                  if (has(P.call)) {
-                      val name = tokens.filter { it !in P.call && it !in P.filler }.joinToString(" ")
+                  val phoneCall = has(P.phoneWord) && has(P.phoneVerbs) && !has(P.inWords) && tokens.size <= 5
+                  if (has(P.call) || phoneCall) {
+                      val name = tokens.filter { it !in P.call && it !in P.phoneWord && it !in P.filler }.joinToString(" ")
                       return if (name.isBlank()) Act.Ask("call_who") else Act.Call(name)
                   }
 
@@ -1897,6 +1934,13 @@ jobs:
                   if (has(P.note)) {
                       val body = bodyAfterThat(tokens, P.noteNoise + P.filler)
                       return if (body.isBlank()) Act.Ask("note_text") else Act.Note(body)
+                  }
+
+                  // 7a. "play ... on YouTube" -> search on YouTube; a complaint like "you are not playing" -> ask Gemini
+                  if (has(P.neg) && (has(P.music) || has(P.play) || has(P.open) || has(P.yt))) return null
+                  if (has(P.yt) && (has(P.open) || has(P.play) || has(P.music))) {
+                      val rest = tokens.filter { it !in P.yt && it !in P.open && it !in P.play && it !in P.filler && it !in P.search }.joinToString(" ")
+                      if (rest.isNotBlank()) return Act.Music("yt:" + rest)
                   }
 
                   // 7. music
@@ -4839,7 +4883,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAE9I+GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAPGA+GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -5005,7 +5049,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAE9I+GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAPGA+GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -5195,7 +5239,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAE9I+GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAPGA+GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -5393,7 +5437,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAE9I+GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAPGA+GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5614,7 +5658,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAE9I+GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAPGA+GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
