@@ -260,6 +260,7 @@ jobs:
           import com.jarvis.app.brain.CardTap
           import com.jarvis.app.brain.Gemini
           import com.jarvis.app.brain.LangUtil
+          import com.jarvis.app.brain.Norm
           import com.jarvis.app.brain.RLang
           import com.jarvis.app.brain.Router
           import com.jarvis.app.brain.tr
@@ -357,10 +358,14 @@ jobs:
                   }
                   listener.onPartial = { _partial.value = it }
                   listener.onLevel = { _level.value = it }
-                  listener.onResult = { text ->
+                  listener.onResult = { options ->
                       _partial.value = ""
                       _level.value = 0f
-                      if (text.isBlank()) problem(RLang.HING, noHear = true) else submit(text)
+                      // the recognizer gives several guesses: prefer the first one Jarvis can act on
+                      val best = options.firstOrNull { it.isNotBlank() && Router.route(it) != null }
+                          ?: options.firstOrNull { it.isNotBlank() }
+                          ?: ""
+                      if (best.isBlank()) problem(RLang.HING, noHear = true) else submit(best)
                   }
                   listener.onError = { code ->
                       _partial.value = ""
@@ -504,7 +509,7 @@ jobs:
                   if (text.isEmpty()) return
                   speaker.stop()
                   work?.cancel()
-                  val earlier = _messages.value.takeLast(8).map { Pair(it.fromUser, it.text) }
+                  val earlier = _messages.value.takeLast(6).map { Pair(it.fromUser, it.text) }
                   addMessage(true, text)
                   _orb.value = OrbState.THINKING
                   work = viewModelScope.launch { process(text, earlier) }
@@ -517,14 +522,16 @@ jobs:
                   var card: ActionCard? = null
                   var pending: com.jarvis.app.brain.PendingCall? = null
 
-                  val local = Router.route(text)
+                  val key = p.apiKey.ifBlank { BuildConfig.GEMINI_API_KEY }
+                  // a long, chatty sentence is better understood by Gemini than by keyword matching
+                  val longTalk = key.isNotBlank() && Norm.tokens(text).size > 7
+                  val local = if (longTalk) null else Router.route(text)
                   if (local != null) {
                       val out = runner.run(local, l, p)
                       reply = out.reply ?: tr(l, "ठीक है।", "Theek hai.", "Okay.")
                       card = out.card
                       pending = out.pendingCall
                   } else {
-                      val key = p.apiKey.ifBlank { BuildConfig.GEMINI_API_KEY }
                       if (key.isBlank()) {
                           reply = tr(
                               l,
@@ -1487,7 +1494,7 @@ jobs:
               ): String {
                   // Gemini wants turns that start with "user" and alternate; merge neighbours of the same role.
                   val turns = ArrayList<Pair<String, String>>()
-                  for ((fromUser, t) in history.takeLast(8) + Pair(true, text)) {
+                  for ((fromUser, t) in history.takeLast(4) + Pair(true, text)) {
                       val role = if (fromUser) "user" else "model"
                       if (turns.isEmpty() && role == "model") continue
                       if (turns.isNotEmpty() && turns.last().first == role) {
@@ -1515,7 +1522,7 @@ jobs:
               }
 
               private fun config(noThink: Boolean): JSONObject {
-                  val c = JSONObject().put("maxOutputTokens", 1024).put("temperature", 0.6)
+                  val c = JSONObject().put("maxOutputTokens", 400).put("temperature", 0.6)
                   if (noThink) c.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
                   return c
               }
@@ -1554,7 +1561,7 @@ jobs:
                           return emptyList()
                       }
                       val sorted = names.sortedWith(
-                          compareBy<String>({ it.contains("preview") }, { it.contains("lite") }).thenByDescending { it }
+                          compareBy<String>({ it.contains("preview") }, { !it.contains("lite") }).thenByDescending { it }
                       )
                       modelCache = sorted
                       return sorted
@@ -2688,6 +2695,7 @@ jobs:
           import androidx.compose.ui.geometry.Size
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.CompositingStrategy
           import androidx.compose.ui.graphics.Shape
           import androidx.compose.ui.graphics.SolidColor
           import androidx.compose.ui.graphics.StrokeCap
@@ -2751,20 +2759,29 @@ jobs:
                                   radius = size.maxDimension * 0.4f
                               )
                           )
-                          val step = 26.dp.toPx()
-                          val radius = 0.8.dp.toPx()
-                          var y = 0f
-                          while (y < size.height) {
-                              var x = 0f
-                              while (x < size.width) {
-                                  drawCircle(Color.White.copy(alpha = 0.05f), radius, Offset(x, y))
-                                  x += step
-                              }
-                              y += step
-                          }
                       },
-                  content = content
-              )
+              ) {
+                  // the dot grid never changes, so it lives in its own layer and is drawn only once
+                  Box(
+                      Modifier
+                          .fillMaxSize()
+                          .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                          .drawBehind {
+                              val step = 26.dp.toPx()
+                              val radius = 0.8.dp.toPx()
+                              var y = 0f
+                              while (y < size.height) {
+                                  var x = 0f
+                                  while (x < size.width) {
+                                      drawCircle(Color.White.copy(alpha = 0.05f), radius, Offset(x, y))
+                                      x += step
+                                  }
+                                  y += step
+                              }
+                          }
+                  )
+                  content()
+              }
           }
 
           // ---------------------------------------------------------------------------- modifiers
@@ -4397,7 +4414,7 @@ jobs:
 
               var onPartial: (String) -> Unit = {}
               var onLevel: (Float) -> Unit = {}
-              var onResult: (String) -> Unit = {}
+              var onResult: (List<String>) -> Unit = {}
               var onError: (Int) -> Unit = {}
 
               private var recognizer: SpeechRecognizer? = null
@@ -4427,7 +4444,7 @@ jobs:
 
                       override fun onResults(results: Bundle?) {
                           val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                          onResult(if (list.isNullOrEmpty()) "" else list[0])
+                          onResult(list?.toList() ?: emptyList())
                       }
 
                       override fun onError(error: Int) {
@@ -4439,7 +4456,12 @@ jobs:
                       putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                       putExtra(RecognizerIntent.EXTRA_LANGUAGE, langTag)
                       putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                      putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                      // Hindi speakers mix in English words: let the recognizer know (Android 13 and newer)
+                      if (langTag.startsWith("hi")) putExtra("android.speech.extra.ADDITIONAL_LANGUAGES", arrayOf("en-IN"))
+                      // stop waiting sooner after you finish speaking
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+                      putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
                       putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
                   }
                   r.startListening(i)
@@ -4943,7 +4965,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAAoR+WoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAE85/GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -5109,7 +5131,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAAoR+WoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAE85/GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -5299,7 +5321,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAAoR+WoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAE85/GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -5497,7 +5519,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAAoR+WoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAE85/GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5718,7 +5740,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAAoR+WoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAE85/GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
