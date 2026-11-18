@@ -277,9 +277,12 @@ jobs:
           import kotlinx.coroutines.withContext
           import kotlinx.coroutines.Job
           import kotlinx.coroutines.delay
+          import kotlinx.coroutines.flow.MutableSharedFlow
           import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.SharedFlow
           import kotlinx.coroutines.flow.SharingStarted
           import kotlinx.coroutines.flow.StateFlow
+          import kotlinx.coroutines.flow.asSharedFlow
           import kotlinx.coroutines.flow.asStateFlow
           import kotlinx.coroutines.flow.stateIn
           import kotlinx.coroutines.launch
@@ -326,6 +329,10 @@ jobs:
               private val _wakeStatus = MutableStateFlow("")
               val wakeStatus: StateFlow<String> = _wakeStatus.asStateFlow()
 
+              /** Asks the screen to open the phone's own voice window (used when the built-in listener keeps failing). */
+              private val _systemVoice = MutableSharedFlow<String>(extraBufferCapacity = 1)
+              val systemVoice: SharedFlow<String> = _systemVoice.asSharedFlow()
+
               private var retried = false
               private var lastTag = "hi-IN"
 
@@ -361,11 +368,7 @@ jobs:
                   listener.onResult = { options ->
                       _partial.value = ""
                       _level.value = 0f
-                      // the recognizer gives several guesses: prefer the first one Jarvis can act on
-                      val best = options.firstOrNull { it.isNotBlank() && Router.route(it) != null }
-                          ?: options.firstOrNull { it.isNotBlank() }
-                          ?: ""
-                      if (best.isBlank()) problem(RLang.HING, noHear = true) else submit(best)
+                      heard(options)
                   }
                   listener.onError = { code ->
                       _partial.value = ""
@@ -382,6 +385,9 @@ jobs:
                                   }
                               }
                           }, 600)
+                      } else if ((code == 11 || code == 8) && _orb.value == OrbState.LISTENING) {
+                          // still failing: let the phone's own voice window do the listening
+                          _systemVoice.tryEmit(lastTag)
                       } else when (code) {
                           SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> problem(currentLang(), noHear = true)
                           SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> micDenied()
@@ -451,6 +457,25 @@ jobs:
                       }
                   }, delayMs)
                   return true
+              }
+
+              /** The recognizer gives several guesses: prefer the first one Jarvis can act on. */
+              private fun heard(options: List<String>) {
+                  val best = options.firstOrNull { it.isNotBlank() && Router.route(it) != null }
+                      ?: options.firstOrNull { it.isNotBlank() }
+                      ?: ""
+                  if (best.isBlank()) problem(RLang.HING, noHear = true) else submit(best)
+              }
+
+              /** Result from the phone's own voice window. An empty list means it was closed without speaking. */
+              fun onSystemVoice(options: List<String>) {
+                  _partial.value = ""
+                  _level.value = 0f
+                  if (options.isEmpty()) {
+                      _orb.value = OrbState.IDLE
+                  } else {
+                      heard(options)
+                  }
               }
 
               /** You finished talking (tapped the orb or the mic again). */
@@ -1318,7 +1343,43 @@ jobs:
                   if (q.length >= 3 && label.contains(q)) return 70
                   if (label.length >= 4 && q.contains(label)) return 65
                   if (q.length >= 4 && Text.distance(label, q) <= 2) return 55
+                  // sounds-alike match: "सर्विस क्लाउड" ~ "Service Cloud"
+                  val qs = skeleton(q)
+                  val ls = skeleton(label)
+                  if (qs.length >= 4 && ls.length >= 3) {
+                      if (ls.contains(qs)) return 62
+                      if (ls.length >= 4 && qs.contains(ls)) return 58
+                      if (Text.distance(qs, ls) <= maxOf(1, minOf(qs.length, ls.length) / 5)) return 58
+                  }
                   return 0
+              }
+
+              private val devaToLatin: Map<Char, String> = mapOf(
+                  'क' to "k", 'ख' to "k", 'ग' to "g", 'घ' to "g", 'च' to "k", 'छ' to "k", 'ज' to "j", 'झ' to "j",
+                  'ट' to "t", 'ठ' to "t", 'ड' to "d", 'ढ' to "d", 'त' to "t", 'थ' to "t", 'द' to "d", 'ध' to "d",
+                  'न' to "n", 'ण' to "n", 'प' to "p", 'फ' to "f", 'ब' to "b", 'भ' to "b", 'म' to "m", 'र' to "r",
+                  'ल' to "l", 'व' to "v", 'श' to "s", 'ष' to "s", 'स' to "s", 'ह' to "h"
+              )
+
+              /** The consonants of a word, written in plain Latin letters, so Hindi and English spellings can be compared by sound. */
+              private fun skeleton(text: String): String {
+                  val sb = StringBuilder()
+                  for (ch in text.lowercase()) {
+                      val mapped = devaToLatin[ch]
+                      if (mapped != null) {
+                          sb.append(mapped)
+                      } else if (ch in 'a'..'z') {
+                          when (ch) {
+                              'a', 'e', 'i', 'o', 'u', 'y', 'w', 'h' -> {}
+                              'c', 'q' -> sb.append('k')
+                              'z' -> sb.append('s')
+                              else -> sb.append(ch)
+                          }
+                      }
+                  }
+                  val out = StringBuilder()
+                  for (ch in sb) if (out.isEmpty() || out.last() != ch) out.append(ch)
+                  return out.toString()
               }
           }
 
@@ -2266,6 +2327,27 @@ jobs:
                   }
               }
 
+              // the phone's own voice window, used when the built-in listener keeps failing
+              val voiceLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                  androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+              ) { result ->
+                  val list = result.data?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
+                  vm.onSystemVoice(list?.toList() ?: emptyList())
+              }
+              LaunchedEffect(Unit) {
+                  vm.systemVoice.collect { tag ->
+                      val i = android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                          .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                          .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, tag)
+                          .putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+                      try {
+                          voiceLauncher.launch(i)
+                      } catch (e: Exception) {
+                          vm.onSystemVoice(emptyList())
+                      }
+                  }
+              }
+
               JarvisBackground {
                   NavHost(
                       navController = nav,
@@ -2875,7 +2957,7 @@ jobs:
                   if (logo != null) {
                       Image(painterResource(logo), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                   } else {
-                      Text(Brand.LETTER, color = Color.White, fontFamily = Anton, fontSize = 20.sp)
+                      JarvisMark(Modifier.fillMaxSize().padding(7.dp))
                   }
               }
           }
@@ -3446,11 +3528,9 @@ jobs:
           package com.jarvis.app.ui
 
           import androidx.compose.foundation.Canvas
-          import androidx.compose.foundation.Image
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.fillMaxSize
           import androidx.compose.foundation.layout.size
-          import androidx.compose.material3.Text
           import androidx.compose.runtime.Composable
           import androidx.compose.runtime.LaunchedEffect
           import androidx.compose.runtime.getValue
@@ -3463,22 +3543,22 @@ jobs:
           import androidx.compose.ui.geometry.Offset
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.graphics.PathEffect
+          import androidx.compose.ui.graphics.StrokeCap
           import androidx.compose.ui.graphics.drawscope.Stroke
-          import androidx.compose.ui.graphics.drawscope.rotate
-          import androidx.compose.ui.layout.ContentScale
-          import androidx.compose.ui.res.painterResource
           import androidx.compose.ui.unit.Dp
           import androidx.compose.ui.unit.dp
-          import androidx.compose.ui.unit.sp
-          import com.jarvis.app.Brand
           import com.jarvis.app.OrbState
+          import kotlin.math.PI
+          import kotlin.math.abs
+          import kotlin.math.cos
+          import kotlin.math.max
+          import kotlin.math.min
           import kotlin.math.sin
 
           /**
-           * The signature Orb. A glowing core, a comet ring that spins, a thin accent ring and a dashed ring.
-           * It looks different in every state: idle (slow), listening (pulses with your voice),
-           * thinking (fast spin), speaking (steady pulse), error (red).
+           * The Voice Halo. A glowing core surrounded by a ring of sound bars.
+           * Listening: the bars jump with your voice. Speaking: they ripple. Thinking: a light runs around the ring.
+           * Idle: they breathe softly. Error: red.
            */
           @Composable
           fun Orb(
@@ -3492,17 +3572,10 @@ jobs:
               val reduce = LocalReduceMotion.current
               val color = if (state == OrbState.ERROR) JC.Red else accent
 
-              var angle by remember { mutableFloatStateOf(0f) }
               var time by remember { mutableFloatStateOf(0f) }
-
-              val degreesPerSecond = when (state) {
-                  OrbState.IDLE -> 40f
-                  OrbState.LISTENING -> 110f
-                  OrbState.THINKING -> 320f
-                  OrbState.SPEAKING -> 160f
-                  OrbState.ERROR -> 30f
-              }
-              val speedNow by rememberUpdatedState(degreesPerSecond)
+              var smooth by remember { mutableFloatStateOf(0f) }
+              val levelNow by rememberUpdatedState(level)
+              val stateNow by rememberUpdatedState(state)
 
               LaunchedEffect(reduce) {
                   if (!reduce) {
@@ -3510,18 +3583,15 @@ jobs:
                       while (true) {
                           androidx.compose.runtime.withFrameNanos { now ->
                               if (last != 0L) {
-                                  val dt = (now - last) / 1_000_000_000f
-                                  angle = (angle + speedNow * dt) % 360f
+                                  val dt = ((now - last) / 1_000_000_000f).coerceAtMost(0.1f)
                                   time += dt
+                                  smooth += (levelNow - smooth) * min(1f, dt * 14f)
                               }
                               last = now
                           }
                       }
                   }
               }
-
-              val levelNow by rememberUpdatedState(level)
-              val stateNow by rememberUpdatedState(state)
 
               Box(
                   modifier
@@ -3533,22 +3603,20 @@ jobs:
                       val c = Offset(size.width / 2f, size.height / 2f)
                       val outer = size.minDimension / 2f
                       val t = time
+                      val sm = smooth
                       val st = stateNow
-                      val lv = levelNow
+                      val n = 64
+                      val twoPi = (2 * PI).toFloat()
 
-                      // breathing / pulsing of the whole orb
-                      val pulse = when (st) {
-                          OrbState.LISTENING -> 1f + lv * 0.08f
-                          OrbState.SPEAKING -> 1f + 0.035f * sin(t * 9f)
-                          OrbState.THINKING -> 1f + 0.015f * sin(t * 5f)
-                          else -> 1f + 0.02f * sin(t * 1.6f)
-                      }
-                      val r = outer * 0.86f * pulse
+                      val breathe = 1f + 0.03f * sin(t * 1.8f)
+                      val coreR = outer * 0.36f * breathe * (if (st == OrbState.LISTENING) 1f + sm * 0.10f else 1f)
+                      val inner = coreR + 9.dp.toPx()
+                      val maxLen = outer - inner - 2.dp.toPx()
 
-                      // soft outer glow
+                      // soft glow behind everything
                       drawCircle(
                           brush = Brush.radialGradient(
-                              colors = listOf(color.copy(alpha = 0.38f + 0.2f * lv), Color.Transparent),
+                              colors = listOf(color.copy(alpha = 0.30f + 0.25f * sm), Color.Transparent),
                               center = c,
                               radius = outer
                           ),
@@ -3556,89 +3624,104 @@ jobs:
                           center = c
                       )
 
-                      // comet ring: a bright head that fades into a tail, spinning
-                      rotate(degrees = angle, pivot = c) {
-                          drawCircle(
-                              brush = Brush.sweepGradient(
-                                  colorStops = arrayOf(
-                                      0f to Color.Transparent,
-                                      0.55f to Color.Transparent,
-                                      1f to color
-                                  ),
-                                  center = c
-                              ),
-                              radius = r,
-                              center = c,
-                              style = Stroke(width = 3.dp.toPx())
-                          )
-                      }
-
-                      // thin accent ring
-                      drawCircle(
-                          color = color.copy(alpha = 0.55f),
-                          radius = r - 14.dp.toPx(),
-                          center = c,
-                          style = Stroke(width = 1.dp.toPx())
-                      )
-
-                      // dashed ring, turning slowly the other way
-                      rotate(degrees = -angle * 0.5f, pivot = c) {
-                          drawCircle(
-                              color = Color.White.copy(alpha = 0.28f),
-                              radius = r - 30.dp.toPx(),
-                              center = c,
-                              style = Stroke(
-                                  width = 1.dp.toPx(),
-                                  pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 7.dp.toPx()))
-                              )
-                          )
-                      }
-
-                      // listening: rings that spread outward
-                      if (st == OrbState.LISTENING) {
-                          val coreR = r * 0.53f
-                          for (k in 0..1) {
-                              val p = (t * 0.8f + k * 0.5f) % 1f
-                              val rr = coreR + p * (r - 14.dp.toPx() - coreR)
-                              drawCircle(
-                                  color = color.copy(alpha = (1f - p) * 0.45f),
-                                  radius = rr,
-                                  center = c,
-                                  style = Stroke(width = 1.5.dp.toPx())
-                              )
+                      // the ring of bars
+                      val sweep = (t * 2.4f) % twoPi
+                      for (i in 0 until n) {
+                          val a = i.toFloat() / n * twoPi - (PI / 2).toFloat()
+                          val m = min(i, n - i)            // mirrored, so left and right look the same
+                          val wave = (sin(m * 0.55f + t * 3.2f) * 0.5f + 0.5f) * (cos(m * 0.21f - t * 1.7f) * 0.5f + 0.5f)
+                          var f = 0f
+                          var alpha = 1f
+                          when (st) {
+                              OrbState.LISTENING -> {
+                                  f = 0.10f + (0.15f + 0.85f * sm) * (0.30f + 0.70f * wave)
+                                  alpha = 0.55f + 0.45f * f
+                              }
+                              OrbState.SPEAKING -> {
+                                  f = 0.14f + 0.50f * (0.25f + 0.75f * wave) * (0.75f + 0.25f * sin(t * 7f + m * 0.35f))
+                                  alpha = 0.6f + 0.4f * f
+                              }
+                              OrbState.THINKING -> {
+                                  val an = i.toFloat() / n * twoPi
+                                  var d = abs(an - sweep)
+                                  d = min(d, twoPi - d)
+                                  val hl = max(0f, 1f - d / 1.1f)
+                                  f = 0.10f + 0.08f * wave + 0.55f * hl
+                                  alpha = 0.30f + 0.70f * hl
+                              }
+                              OrbState.ERROR -> {
+                                  f = 0.12f + 0.10f * (sin(t * 14f) * 0.5f + 0.5f)
+                                  alpha = 0.9f
+                              }
+                              OrbState.IDLE -> {
+                                  f = 0.08f + 0.12f * wave
+                                  alpha = 0.5f + 0.2f * wave
+                              }
                           }
+                          val len = f.coerceIn(0.05f, 1f) * maxLen
+                          val dx = cos(a)
+                          val dy = sin(a)
+                          drawLine(
+                              color = color.copy(alpha = alpha.coerceIn(0f, 1f)),
+                              start = Offset(c.x + dx * inner, c.y + dy * inner),
+                              end = Offset(c.x + dx * (inner + len), c.y + dy * (inner + len)),
+                              strokeWidth = 3.2.dp.toPx(),
+                              cap = StrokeCap.Round
+                          )
                       }
 
                       // glass core
-                      val coreR = r * 0.53f * (if (st == OrbState.LISTENING) 1f + lv * 0.12f else 1f)
                       drawCircle(
                           brush = Brush.radialGradient(
-                              colors = listOf(color.copy(alpha = 0.60f), color.copy(alpha = 0.16f), Color.Black.copy(alpha = 0.92f)),
-                              center = Offset(c.x - coreR * 0.25f, c.y - coreR * 0.3f),
+                              colors = listOf(color.copy(alpha = 0.75f), color.copy(alpha = 0.20f), Color.Black.copy(alpha = 0.92f)),
+                              center = Offset(c.x - coreR * 0.25f, c.y - coreR * 0.30f),
                               radius = coreR * 1.5f
                           ),
                           radius = coreR,
                           center = c
                       )
                       drawCircle(
-                          color = Color.White.copy(alpha = 0.25f),
+                          color = Color.White.copy(alpha = 0.28f),
                           radius = coreR,
                           center = c,
                           style = Stroke(width = 1.dp.toPx())
                       )
-                  }
-
-                  val logo = Brand.LOGO_RES
-                  if (logo != null) {
-                      Image(
-                          painterResource(logo),
-                          contentDescription = null,
-                          contentScale = ContentScale.Fit,
-                          modifier = Modifier.size(diameter * 0.3f)
+                      // bright heart that swells with sound
+                      drawCircle(
+                          color = Color.White.copy(alpha = 0.9f),
+                          radius = coreR * (0.16f + 0.10f * sm + (if (st == OrbState.SPEAKING) 0.04f * sin(t * 9f) else 0f)),
+                          center = c
                       )
-                  } else {
-                      Text(Brand.LETTER, color = Color.White, fontFamily = Anton, fontSize = (diameter.value * 0.25f).sp)
                   }
+              }
+          }
+
+          /** The Jarvis logo mark: a glowing core inside a ring of sound bars. Not a letter. */
+          @Composable
+          fun JarvisMark(modifier: Modifier = Modifier) {
+              val color = LocalAccent.current
+              Canvas(modifier) {
+                  val c = Offset(size.width / 2f, size.height / 2f)
+                  val outer = size.minDimension / 2f
+                  val coreR = outer * 0.34f
+                  val inner = coreR + outer * 0.12f
+                  val maxLen = outer - inner
+                  val pattern = floatArrayOf(0.5f, 0.8f, 1.0f, 0.65f, 0.9f, 0.55f, 0.75f)
+                  val n = 20
+                  val twoPi = (2 * PI).toFloat()
+                  for (i in 0 until n) {
+                      val a = i.toFloat() / n * twoPi - (PI / 2).toFloat()
+                      val h = pattern[min(i, n - i) % pattern.size]
+                      drawLine(
+                          color = color,
+                          start = Offset(c.x + cos(a) * inner, c.y + sin(a) * inner),
+                          end = Offset(c.x + cos(a) * (inner + maxLen * h), c.y + sin(a) * (inner + maxLen * h)),
+                          strokeWidth = outer * 0.085f,
+                          cap = StrokeCap.Round
+                      )
+                  }
+                  drawCircle(color, coreR, c)
+                  drawCircle(Color.White.copy(alpha = 0.85f), coreR * 0.32f, Offset(c.x - coreR * 0.15f, c.y - coreR * 0.18f))
               }
           }
           JARVIS_EOF
@@ -4421,10 +4504,25 @@ jobs:
 
               fun available(): Boolean = SpeechRecognizer.isRecognitionAvailable(ctx)
 
+              /** Prefer Google's own recognizer when the phone has it: some phone makers' default one keeps disconnecting. */
+              private fun createRecognizer(): SpeechRecognizer {
+                  val google = android.content.ComponentName(
+                      "com.google.android.googlequicksearchbox",
+                      "com.google.android.voicesearch.serviceapi.GoogleRecognitionService"
+                  )
+                  val installed = try {
+                      ctx.packageManager.getServiceInfo(google, 0)
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
+                  return if (installed) SpeechRecognizer.createSpeechRecognizer(ctx, google) else SpeechRecognizer.createSpeechRecognizer(ctx)
+              }
+
               /** langTag: "hi-IN" or "en-IN". */
               fun start(langTag: String) {
                   destroy()
-                  val r = SpeechRecognizer.createSpeechRecognizer(ctx)
+                  val r = createRecognizer()
                   r.setRecognitionListener(object : RecognitionListener {
                       override fun onReadyForSpeech(params: Bundle?) {}
                       override fun onBeginningOfSpeech() {}
@@ -4957,15 +5055,20 @@ jobs:
               android:viewportWidth="108"
               android:viewportHeight="108">
               <path android:fillColor="#000000" android:pathData="M0,0h108v108h-108z" />
-              <path android:fillColor="#08323C" android:pathData="M54,54m-36,0a36,36 0,1 1,72 0a36,36 0,1 1,-72 0" />
-              <path android:fillColor="#18E0FF" android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0" />
-              <path android:fillColor="#00131A" android:pathData="M54,54m-20,0a20,20 0,1 1,40 0a20,20 0,1 1,-40 0" />
-              <path android:fillColor="#FFFFFF" android:pathData="M58,40h6v22q0,10 -10,10q-6,0 -9,-4l4,-4q2,2 4,2q5,0 5,-5z" />
+              <path android:fillColor="#0A2F38" android:pathData="M54,54m-44,0a44,44 0,1 1,88 0a44,44 0,1 1,-88 0" />
+              <path android:fillColor="#000000" android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+              <path
+                  android:strokeColor="#18E0FF"
+                  android:strokeWidth="3.4"
+                  android:strokeLineCap="round"
+                  android:pathData="M54.00,37.00L54.00,27.10 M57.78,37.43L61.21,22.41 M61.38,38.68L70.44,19.85 M64.60,40.71L72.83,30.39 M67.29,43.40L81.05,32.43 M69.32,46.62L89.14,37.08 M70.57,50.22L84.52,47.04 M71.00,54.00L82.00,54.00 M70.57,57.78L88.80,61.94 M69.32,61.38L80.22,66.63 M67.29,64.60L82.77,76.94 M64.60,67.29L74.20,79.33 M61.38,69.32L65.19,77.24 M57.78,70.57L60.72,83.44 M54.00,71.00L54.00,80.90 M50.22,70.57L47.28,83.44 M46.62,69.32L42.81,77.24 M43.40,67.29L33.80,79.33 M40.71,64.60L25.23,76.94 M38.68,61.38L27.78,66.63 M37.43,57.78L19.20,61.94 M37.00,54.00L26.00,54.00 M37.43,50.22L23.48,47.04 M38.68,46.62L18.86,37.08 M40.71,43.40L26.95,32.43 M43.40,40.71L35.17,30.39 M46.62,38.68L37.56,19.85 M50.22,37.43L46.79,22.41" />
+              <path android:fillColor="#18E0FF" android:pathData="M54,54m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0" />
+              <path android:fillColor="#FFFFFF" android:fillAlpha="0.85" android:pathData="M52,51m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0" />
           </vector>
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAE85/GoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIACAB/WoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -5131,7 +5234,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAE85/GoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIACAB/WoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -5321,7 +5424,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAE85/GoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIACAB/WoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -5519,7 +5622,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAE85/GoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIACAB/WoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5740,7 +5843,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAE85/GoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIACAB/WoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
