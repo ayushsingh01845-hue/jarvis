@@ -128,6 +128,7 @@ jobs:
               <uses-permission android:name="android.permission.CALL_PHONE" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+              <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -226,6 +227,7 @@ jobs:
           class JarvisApplication : Application() {
               override fun onCreate() {
                   super.onCreate()
+                  com.jarvis.app.voice.Listener.restoreSound(this)
                   val previous = Thread.getDefaultUncaughtExceptionHandler()
                   Thread.setDefaultUncaughtExceptionHandler { thread, error ->
                       try {
@@ -332,6 +334,10 @@ jobs:
               /** Asks the screen to open the phone's own voice window (used when the built-in listener keeps failing). */
               private val _systemVoice = MutableSharedFlow<String>(extraBufferCapacity = 1)
               val systemVoice: SharedFlow<String> = _systemVoice.asSharedFlow()
+
+              private val _mood = MutableStateFlow(Mood.NEUTRAL)
+              val mood: StateFlow<Mood> = _mood.asStateFlow()
+              private var moodJob: Job? = null
 
               private var retried = false
               private var lastTag = "hi-IN"
@@ -523,6 +529,18 @@ jobs:
 
               // ------------------------------------------------------------------ thinking
 
+              /** Show a feeling on the face for a few seconds, then go back to neutral. */
+              private fun showMood(m: Mood, holdMs: Long = 7000) {
+                  _mood.value = m
+                  moodJob?.cancel()
+                  if (m != Mood.NEUTRAL) {
+                      moodJob = viewModelScope.launch {
+                          delay(holdMs)
+                          _mood.value = Mood.NEUTRAL
+                      }
+                  }
+              }
+
               private fun addMessage(fromUser: Boolean, text: String, card: ActionCard? = null) {
                   val m = ChatMessage(nextId++, fromUser, text, card)
                   _messages.value = _messages.value + m
@@ -536,6 +554,7 @@ jobs:
                   work?.cancel()
                   val earlier = _messages.value.takeLast(6).map { Pair(it.fromUser, it.text) }
                   addMessage(true, text)
+                  MoodRead.fromUser(text)?.let { showMood(it, 5000) }
                   _orb.value = OrbState.THINKING
                   work = viewModelScope.launch { process(text, earlier) }
               }
@@ -546,6 +565,7 @@ jobs:
                   var reply = ""
                   var card: ActionCard? = null
                   var pending: com.jarvis.app.brain.PendingCall? = null
+                  var feeling: Mood? = null
 
                   val key = p.apiKey.ifBlank { BuildConfig.GEMINI_API_KEY }
                   // a long, chatty sentence is better understood by Gemini than by keyword matching
@@ -556,6 +576,7 @@ jobs:
                       reply = out.reply ?: tr(l, "ठीक है।", "Theek hai.", "Okay.")
                       card = out.card
                       pending = out.pendingCall
+                      feeling = if (out.ok) Mood.HAPPY else Mood.SAD
                   } else {
                       if (key.isBlank()) {
                           reply = tr(
@@ -567,7 +588,9 @@ jobs:
                           card = ActionCard("KEY", "SETTINGS", "Smart answers are off", CardTap.NONE)
                       } else {
                           try {
-                              val g = Gemini.ask(key, p.userName.ifBlank { "Ayush" }, p.language, earlier, text)
+                              val g = Gemini.ask(key, p.userName.ifBlank { "Ayush" }, p.language, earlier, text, p.geminiModel)
+                              if (g.model.isNotEmpty() && g.model != p.geminiModel) set(K.geminiModel, g.model)
+                              feeling = MoodRead.fromKey(g.emotion)
                               if (g.act is Act.None) {
                                   reply = g.text
                               } else {
@@ -596,6 +619,7 @@ jobs:
                       }
                   }
 
+                  if (feeling != null) showMood(feeling, 7000)
                   finish(reply, card, pending, p)
               }
 
@@ -626,7 +650,7 @@ jobs:
               private fun finish(reply: String, card: ActionCard?, pending: com.jarvis.app.brain.PendingCall?, p: Prefs) {
                   addMessage(false, reply, card)
                   var speaking = false
-                  if (p.speakAloud) speaking = speaker.speak(reply, p.speed, p.maleVoice)
+                  if (p.speakAloud) speaking = speaker.speak(reply, p.speed, p.maleVoice, p.voiceHi, p.voiceEn, p.pitch)
                   if (!speaking) _orb.value = OrbState.IDLE
                   // else: the Speaker callback switches the orb to SPEAKING and back to IDLE
 
@@ -695,6 +719,16 @@ jobs:
                   if (prefs.value.wakeWord && WakeModel.ready(app) && !WakeBus.active) WakeControl.start(app)
               }
 
+              /** The voices this phone offers for "hi" or "en". */
+              fun voiceChoices(lang: String): List<Pair<String, String>> = speaker.voices(lang)
+
+              /** Say a short sample so you can hear a voice choice. */
+              fun previewVoice(hindi: Boolean, voiceHi: String, voiceEn: String, pitch: Float) {
+                  val p = prefs.value
+                  val sample = if (hindi) "नमस्ते, मैं जार्विस हूँ। बोलिए, क्या करना है?" else "Hey, it's Jarvis. What are we doing?"
+                  speaker.speak(sample, p.speed, p.maleVoice, voiceHi, voiceEn, pitch)
+              }
+
               fun addNote(text: String) {
                   if (text.isBlank()) return
                   viewModelScope.launch { repo.addNote(text.trim()) }
@@ -756,6 +790,72 @@ jobs:
                       JarvisTheme(accentKey = prefs.accent) {
                           AppNav(vm)
                       }
+                  }
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app"
+          cat > app/src/main/java/com/jarvis/app/Mood.kt <<'JARVIS_EOF'
+          package com.jarvis.app
+
+          /** The feelings the face can show. */
+          enum class Mood { NEUTRAL, HAPPY, LAUGH, SAD, SURPRISED, ANGRY, LOVE, WINK, SLEEPY }
+
+          object MoodRead {
+
+              /** Gemini answers with a word like "laugh" or "sad". */
+              fun fromKey(key: String): Mood? {
+                  return when (key.trim().lowercase()) {
+                      "neutral" -> Mood.NEUTRAL
+                      "happy", "glad", "smile" -> Mood.HAPPY
+                      "laugh", "laughing", "funny" -> Mood.LAUGH
+                      "sad", "cry", "crying", "empathy" -> Mood.SAD
+                      "surprised", "surprise", "wow" -> Mood.SURPRISED
+                      "angry", "mad" -> Mood.ANGRY
+                      "love", "loving", "heart" -> Mood.LOVE
+                      "wink", "playful" -> Mood.WINK
+                      "sleepy", "tired" -> Mood.SLEEPY
+                      else -> null
+                  }
+              }
+
+              private val laughWords = setOf("haha", "hahaha", "hehe", "lol", "lmao", "हाहा", "हंस", "हँस", "हंसी", "hasi", "mazak", "मज़ाक", "मजाक", "joke", "जोक", "funny")
+              private val sadWords = setOf("रोना", "रोता", "रोती", "rona", "sad", "उदास", "udaas", "udas", "दुख", "dukh", "dard", "अकेला", "akela", "depressed", "cry", "crying")
+              private val angryWords = setOf("गुस्सा", "gussa", "angry", "बकवास", "bakwas", "hate")
+              private val loveWords = setOf("प्यार", "pyaar", "pyar", "love")
+              private val surpriseWords = setOf("wow", "omg", "सच", "sach", "really")
+              private val happyWords = setOf("thanks", "thankyou", "shukriya", "धन्यवाद", "शुक्रिया", "mast", "मस्त", "badhiya", "बढ़िया", "great", "awesome", "congratulations")
+              private val sleepyWords = setOf("neend", "नींद", "sleepy", "सोना", "sona")
+
+              private val emojiMoods: List<Pair<String, Mood>> = listOf(
+                  "😂" to Mood.LAUGH, "🤣" to Mood.LAUGH, "😢" to Mood.SAD, "😭" to Mood.SAD, "😡" to Mood.ANGRY,
+                  "😍" to Mood.LOVE, "❤" to Mood.LOVE, "😮" to Mood.SURPRISED, "😉" to Mood.WINK, "😊" to Mood.HAPPY
+              )
+
+              private val phraseMoods: List<Pair<String, Mood>> = listOf(
+                  "ro raha" to Mood.SAD, "ro rahi" to Mood.SAD, "रो रहा" to Mood.SAD, "रो रही" to Mood.SAD, "रोने" to Mood.SAD,
+                  "bura lag" to Mood.SAD, "बुरा लग" to Mood.SAD, "मर गया" to Mood.SAD, "mar gaya" to Mood.SAD,
+                  "miss you" to Mood.LOVE, "i love" to Mood.LOVE, "love you" to Mood.LOVE,
+                  "good night" to Mood.SLEEPY, "गुड नाइट" to Mood.SLEEPY,
+                  "क्या बात" to Mood.SURPRISED, "kya baat" to Mood.SURPRISED
+              )
+
+              /** Guess how the user feels from what they said, so the face can react at once. */
+              fun fromUser(text: String): Mood? {
+                  val t = text.lowercase()
+                  for (p in emojiMoods) if (t.contains(p.first)) return p.second
+                  for (p in phraseMoods) if (t.contains(p.first)) return p.second
+                  val words = t.split(Regex("[^\\p{L}\\p{M}\\p{N}]+")).filter { it.isNotEmpty() }.toSet()
+                  fun any(s: Set<String>) = words.any { it in s }
+                  return when {
+                      any(laughWords) -> Mood.LAUGH
+                      any(sadWords) -> Mood.SAD
+                      any(angryWords) -> Mood.ANGRY
+                      any(loveWords) -> Mood.LOVE
+                      any(surpriseWords) -> Mood.SURPRISED
+                      any(happyWords) -> Mood.HAPPY
+                      any(sleepyWords) -> Mood.SLEEPY
+                      else -> null
                   }
               }
           }
@@ -1466,7 +1566,7 @@ jobs:
 
               class GeminiError(val code: String, val detail: String = "") : Exception(code)
 
-              data class Reply(val text: String, val act: Act)
+              data class Reply(val text: String, val act: Act, val model: String = "", val emotion: String = "")
 
               private const val BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -1484,12 +1584,14 @@ jobs:
                   userName: String,
                   languageSetting: String,
                   history: List<Pair<Boolean, String>>,
-                  text: String
+                  text: String,
+                  savedModel: String = ""
               ): Reply = withContext(Dispatchers.IO) {
                   if (key.isBlank()) throw GeminiError("nokey")
                   val body = buildBody(userName, languageSetting, history, text, false)
                   val bodyNoThink = buildBody(userName, languageSetting, history, text, true)
 
+                  if (goodModel == null && savedModel.isNotBlank()) goodModel = savedModel
                   val good = goodModel
                   val found = if (good != null) {
                       emptyList()
@@ -1504,12 +1606,18 @@ jobs:
 
                   var last = GeminiError("http", "no model")
                   var sawRate = false
+                  var ioError: IOException? = null
                   for (m in candidates) {
                       try {
                           // 2.5 models "think" before answering, which is slow; switch that off
                           val reply = parseReply(callOnce(m, key, if (m.contains("2.5")) bodyNoThink else body))
                           goodModel = m
-                          return@withContext reply
+                          return@withContext reply.copy(model = m)
+                      } catch (e: IOException) {
+                          // too slow or no connection on this model: move on to the next one quickly
+                          if (m == good) goodModel = null
+                          ioError = e
+                          last = GeminiError("http", m + " slow")
                       } catch (e: GeminiError) {
                           if (m == good) goodModel = null
                           when (e.code) {
@@ -1523,6 +1631,7 @@ jobs:
                       }
                   }
                   if (sawRate) throw GeminiError("rate", last.detail)
+                  ioError?.let { throw it }
                   throw last
               }
 
@@ -1540,7 +1649,8 @@ jobs:
                       langRule,
                       "Keep every reply to one or two short sentences unless the user asks for more. Your reply is spoken aloud, so use no markdown, no lists and no emoji.",
                       "You cannot see live data such as news, weather or prices. Say so honestly instead of guessing.",
-                      "Reply with JSON only, exactly in this shape: {\"reply\":\"text\",\"lang\":\"hi or en\",\"action\":{\"type\":\"none\",\"args\":{}}}",
+                      "Reply with JSON only, exactly in this shape: {\"reply\":\"text\",\"lang\":\"hi or en\",\"emotion\":\"neutral\",\"action\":{\"type\":\"none\",\"args\":{}}}",
+                      "emotion is how your face should feel while replying, one of: neutral, happy, laugh, sad, surprised, angry, love, wink, sleepy. Mirror the user like a real friend: laugh when they joke or laugh, sad (and comforting) when they are sad or crying, surprised at big news, love for affection, wink for playful teasing, angry only in a playful way, happy for good news or thanks.",
                       "Allowed action types and their args: alarm {hour 0-23, minute 0-59, label}, timer {seconds}, call {name}, sms {name, text}, open_app {name}, torch {state: on or off}, volume {direction: up, down, mute or max}, music {query}, note {text}, reminder {text, hour, minute}, web_search {query}, none {}.",
                       "Use action none for normal conversation. Use another action only when the user clearly asks for it. When you set an action, the reply says briefly what you are doing."
                   ).joinToString("\n")
@@ -1635,8 +1745,8 @@ jobs:
                   val conn = URL("$BASE/${model}:generateContent").openConnection() as HttpURLConnection
                   try {
                       conn.requestMethod = "POST"
-                      conn.connectTimeout = 15000
-                      conn.readTimeout = 25000
+                      conn.connectTimeout = 8000
+                      conn.readTimeout = 14000
                       conn.doOutput = true
                       conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                       conn.setRequestProperty("x-goog-api-key", key)
@@ -1686,7 +1796,7 @@ jobs:
                           val reply = o.optString("reply", "")
                           if (reply.isNotEmpty()) {
                               val action = o.optJSONObject("action")
-                              return Reply(reply, toAct(action))
+                              return Reply(reply, toAct(action), "", o.optString("emotion", ""))
                           }
                       } catch (e: JSONException) {
                           // fall through: speak the plain text
@@ -2173,6 +2283,10 @@ jobs:
               val notes = stringPreferencesKey("notes_json")
               val wakeWord = booleanPreferencesKey("wake_word")
               val maleVoice = booleanPreferencesKey("male_voice")
+              val voiceHi = stringPreferencesKey("voice_hi")
+              val voiceEn = stringPreferencesKey("voice_en")
+              val pitch = floatPreferencesKey("pitch")
+              val geminiModel = stringPreferencesKey("gemini_model")
           }
 
           data class Prefs(
@@ -2191,7 +2305,11 @@ jobs:
               val skillNotes: Boolean = true,
               val skillWeb: Boolean = true,
               val wakeWord: Boolean = false,
-              val maleVoice: Boolean = true
+              val maleVoice: Boolean = true,
+              val voiceHi: String = "",
+              val voiceEn: String = "",
+              val pitch: Float = 1.0f,
+              val geminiModel: String = ""
           )
 
           @Serializable
@@ -2217,7 +2335,11 @@ jobs:
                       skillNotes = p[K.skillNotes] ?: d.skillNotes,
                       skillWeb = p[K.skillWeb] ?: d.skillWeb,
                       wakeWord = p[K.wakeWord] ?: d.wakeWord,
-                      maleVoice = p[K.maleVoice] ?: d.maleVoice
+                      maleVoice = p[K.maleVoice] ?: d.maleVoice,
+                      voiceHi = p[K.voiceHi] ?: d.voiceHi,
+                      voiceEn = p[K.voiceEn] ?: d.voiceEn,
+                      pitch = p[K.pitch] ?: d.pitch,
+                      geminiModel = p[K.geminiModel] ?: d.geminiModel
                   )
               }
 
@@ -2282,6 +2404,7 @@ jobs:
           private const val SPLASH = "splash"
           private const val HOME = "home"
           private const val CHAT = "chat"
+          private const val FACE = "face"
           private const val TASKS = "tasks"
           private const val SKILLS = "skills"
           private const val SETTINGS = "settings"
@@ -2296,6 +2419,7 @@ jobs:
 
               val dockSelected = when (route) {
                   HOME -> "HOME"
+                  FACE -> "FACE"
                   TASKS -> "TASKS"
                   SKILLS -> "SKILLS"
                   else -> null
@@ -2377,6 +2501,9 @@ jobs:
                               onPermissions = { nav.navigate(PERMISSIONS) { launchSingleTop = true } }
                           )
                       }
+                      composable(FACE) {
+                          FaceScreen(vm, onMenu = { nav.navigate(SETTINGS) { launchSingleTop = true } })
+                      }
                       composable(TASKS) {
                           TasksScreen(vm, onMenu = { nav.navigate(SETTINGS) { launchSingleTop = true } })
                       }
@@ -2405,6 +2532,7 @@ jobs:
                           Dock(selected = dockSelected, onSelect = { item ->
                               when (item) {
                                   "HOME" -> goTab(nav, HOME)
+                                  "FACE" -> goTab(nav, FACE)
                                   "CHAT" -> goTab(nav, CHAT)
                                   "TASKS" -> goTab(nav, TASKS)
                                   "SKILLS" -> goTab(nav, SKILLS)
@@ -3030,7 +3158,7 @@ jobs:
                       .padding(6.dp),
                   horizontalArrangement = Arrangement.spacedBy(4.dp)
               ) {
-                  for (item in listOf("HOME", "CHAT", "TASKS", "SKILLS")) {
+                  for (item in listOf("HOME", "FACE", "CHAT", "TASKS", "SKILLS")) {
                       val on = item == selected
                       val itemShape = RoundedCornerShape(30.dp)
                       Box(
@@ -3044,7 +3172,7 @@ jobs:
                                   else Modifier
                               )
                               .pressable { onSelect(item) }
-                              .padding(horizontal = 15.dp),
+                              .padding(horizontal = 10.dp),
                           contentAlignment = Alignment.Center
                       ) {
                           Text(
@@ -3229,6 +3357,294 @@ jobs:
                           size = Size(bw, h),
                           cornerRadius = CornerRadius(bw / 2f)
                       )
+                  }
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/ui"
+          cat > app/src/main/java/com/jarvis/app/ui/FaceScreen.kt <<'JARVIS_EOF'
+          package com.jarvis.app.ui
+
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.collectAsState
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableFloatStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.rememberUpdatedState
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.StrokeJoin
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.graphics.drawscope.rotate
+          import androidx.compose.ui.graphics.lerp
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import com.jarvis.app.JarvisViewModel
+          import com.jarvis.app.Mood
+          import com.jarvis.app.OrbState
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.sin
+
+          /** A face that listens to you and shows how it feels: it laughs, cries, gets surprised and so on. */
+          @Composable
+          fun FaceScreen(vm: JarvisViewModel, onMenu: () -> Unit) {
+              val prefs by vm.prefs.collectAsState()
+              val orb by vm.orb.collectAsState()
+              val mood by vm.mood.collectAsState()
+              val level by vm.level.collectAsState()
+              val partial by vm.partial.collectAsState()
+              val messages by vm.messages.collectAsState()
+              val hindi = prefs.language == "HINDI"
+              val mic = rememberMicAction(vm)
+
+              val lastReply = messages.lastOrNull { !it.fromUser }?.text ?: ""
+              val caption = when {
+                  orb == OrbState.LISTENING -> if (partial.isNotBlank()) partial else pick(hindi, "सुन रहा हूँ…", "LISTENING…")
+                  orb == OrbState.THINKING -> pick(hindi, "सोच रहा हूँ…", "THINKING…")
+                  lastReply.isNotBlank() -> lastReply
+                  else -> pick(hindi, "मुझे छुएँ और बात करें", "TAP ME AND TALK")
+              }
+
+              Column(
+                  Modifier
+                      .fillMaxSize()
+                      .statusBarsPadding()
+                      .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally
+              ) {
+                  TopBar(pick(hindi, "चेहरा", "FACE"), mood.name, MenuIcon.HAMBURGER, onMenu)
+                  Spacer(Modifier.weight(1f))
+                  FaceView(mood = mood, orb = orb, level = level, modifier = Modifier.size(300.dp).pressable(onClick = mic))
+                  Spacer(Modifier.height(18.dp))
+                  Text(
+                      caption,
+                      color = Color.White,
+                      fontFamily = Inter,
+                      fontSize = 15.sp,
+                      lineHeight = 21.sp,
+                      textAlign = TextAlign.Center,
+                      maxLines = 4,
+                      modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                  )
+                  Spacer(Modifier.weight(1f))
+              }
+          }
+
+          /** How the face is shaped for each feeling. */
+          private data class Look(
+              val eyeOpen: Float,
+              val arc: Float,      // 1 = happy closed eyes (^ ^)
+              val tilt: Float,     // + angry, - sad
+              val smile: Float,    // + smile, - frown
+              val open: Float,     // mouth open
+              val cheek: Float,
+              val heart: Float,
+              val red: Float,
+              val tears: Boolean = false,
+              val wink: Boolean = false
+          )
+
+          private fun lookFor(m: Mood): Look = when (m) {
+              Mood.NEUTRAL -> Look(1f, 0f, 0f, 0.25f, 0f, 0f, 0f, 0f)
+              Mood.HAPPY -> Look(0.9f, 0f, 0f, 0.85f, 0f, 0.8f, 0f, 0f)
+              Mood.LAUGH -> Look(1f, 1f, 0f, 1f, 0.9f, 1f, 0f, 0f)
+              Mood.SAD -> Look(0.8f, 0f, -1f, -0.8f, 0f, 0f, 0f, 0f, tears = true)
+              Mood.SURPRISED -> Look(1.3f, 0f, 0f, 0f, 0.75f, 0f, 0f, 0f)
+              Mood.ANGRY -> Look(0.7f, 0f, 1f, -0.5f, 0.1f, 0f, 0f, 1f)
+              Mood.LOVE -> Look(1f, 0f, 0f, 0.9f, 0f, 1f, 1f, 0f)
+              Mood.WINK -> Look(1f, 0f, 0f, 0.9f, 0f, 0.6f, 0f, 0f, wink = true)
+              Mood.SLEEPY -> Look(0.15f, 0f, 0f, 0.1f, 0f, 0f, 0f, 0f)
+          }
+
+          @Composable
+          fun FaceView(mood: Mood, orb: OrbState, level: Float, modifier: Modifier = Modifier) {
+              val accent = LocalAccent.current
+              val reduce = LocalReduceMotion.current
+              var time by remember { mutableFloatStateOf(0f) }
+              val orbNow by rememberUpdatedState(orb)
+              val levelNow by rememberUpdatedState(level)
+              val moodNow by rememberUpdatedState(mood)
+
+              LaunchedEffect(reduce) {
+                  if (!reduce) {
+                      var last = 0L
+                      while (true) {
+                          androidx.compose.runtime.withFrameNanos { now ->
+                              if (last != 0L) time += ((now - last) / 1_000_000_000f).coerceAtMost(0.1f)
+                              last = now
+                          }
+                      }
+                  }
+              }
+
+              val look = lookFor(mood)
+              val spec = tween<Float>(380)
+              val eyeOpen by animateFloatAsState(look.eyeOpen, spec, label = "eyeOpen")
+              val arc by animateFloatAsState(look.arc, spec, label = "arc")
+              val tilt by animateFloatAsState(look.tilt, spec, label = "tilt")
+              val smile by animateFloatAsState(look.smile, spec, label = "smile")
+              val open by animateFloatAsState(look.open, spec, label = "open")
+              val cheek by animateFloatAsState(look.cheek, spec, label = "cheek")
+              val heart by animateFloatAsState(look.heart, spec, label = "heart")
+              val red by animateFloatAsState(look.red, spec, label = "red")
+              val wink = look.wink
+              val tears = look.tears
+
+              Canvas(modifier) {
+                  val u = size.minDimension / 300f
+                  val t = time
+                  val st = orbNow
+                  val lv = levelNow
+                  val color = lerp(accent, JC.Red, red.coerceIn(0f, 1f))
+
+                  val bounce = if (moodNow == Mood.LAUGH) sin(t * 16f) * 4f * u else 0f
+                  val cx = size.width / 2f
+                  val cy = size.height / 2f + bounce
+
+                  // soft glow behind the face
+                  drawCircle(
+                      brush = Brush.radialGradient(
+                          colors = listOf(color.copy(alpha = 0.20f), Color.Transparent),
+                          center = Offset(cx, cy),
+                          radius = 160f * u
+                      ),
+                      radius = 160f * u,
+                      center = Offset(cx, cy)
+                  )
+
+                  // where the eyes look, and how wide they are
+                  var lookX = 0f
+                  var lookY = 0f
+                  var wide = 1f
+                  if (st == OrbState.LISTENING) {
+                      lookY = -6f * u
+                      wide = 1.12f
+                  } else if (st == OrbState.THINKING) {
+                      lookX = sin(t * 1.6f) * 14f * u
+                      lookY = -4f * u
+                  }
+                  val phase = t % 4.2f
+                  val blink = if (phase < 0.14f) abs(phase - 0.07f) / 0.07f else 1f
+
+                  val eyeDX = 70f * u
+                  val eyeBaseY = cy - 40f * u
+
+                  for (side in intArrayOf(-1, 1)) {
+                      val ex = cx + side * eyeDX + lookX
+                      val ey = eyeBaseY + lookY
+                      val winking = wink && side == -1
+                      val arcEff = if (winking) 1f else arc
+                      val wOval = (1f - heart) * (1f - arcEff)
+                      val wArc = (1f - heart) * arcEff
+
+                      if (wOval > 0.01f) {
+                          val w = 46f * u
+                          val h = max(5f * u, 64f * u * eyeOpen * wide * blink)
+                          rotate(degrees = -side * tilt * 16f, pivot = Offset(ex, ey)) {
+                              drawRoundRect(
+                                  color = color.copy(alpha = 0.18f * wOval),
+                                  topLeft = Offset(ex - w / 2f - 7f * u, ey - h / 2f - 7f * u),
+                                  size = Size(w + 14f * u, h + 14f * u),
+                                  cornerRadius = CornerRadius((w + 14f * u) / 2f)
+                              )
+                              drawRoundRect(
+                                  color = color.copy(alpha = wOval),
+                                  topLeft = Offset(ex - w / 2f, ey - h / 2f),
+                                  size = Size(w, h),
+                                  cornerRadius = CornerRadius(w / 2f)
+                              )
+                          }
+                      }
+                      if (wArc > 0.01f) {
+                          drawArc(
+                              color = color.copy(alpha = wArc),
+                              startAngle = 200f,
+                              sweepAngle = 140f,
+                              useCenter = false,
+                              topLeft = Offset(ex - 26f * u, ey - 10f * u),
+                              size = Size(52f * u, 52f * u),
+                              style = Stroke(width = 11f * u, cap = StrokeCap.Round)
+                          )
+                      }
+                      if (heart > 0.01f) {
+                          val s = 34f * u * (1f + 0.12f * sin(t * 6f))
+                          val p = Path().apply {
+                              moveTo(ex, ey + s * 0.55f)
+                              cubicTo(ex - s * 1.1f, ey - s * 0.05f, ex - s * 0.7f, ey - s * 0.95f, ex, ey - s * 0.4f)
+                              cubicTo(ex + s * 0.7f, ey - s * 0.95f, ex + s * 1.1f, ey - s * 0.05f, ex, ey + s * 0.55f)
+                              close()
+                          }
+                          drawPath(p, color.copy(alpha = heart))
+                      }
+
+                      // cheeks
+                      if (cheek > 0.01f) {
+                          drawCircle(color.copy(alpha = 0.22f * cheek), 24f * u, Offset(cx + side * 112f * u, cy + 42f * u))
+                      }
+
+                      // tears
+                      if (tears) {
+                          val ph = (t * 0.7f + (if (side < 0) 0f else 0.5f)) % 1f
+                          drawCircle(
+                              Color.White.copy(alpha = (1f - ph) * 0.8f),
+                              6f * u,
+                              Offset(ex + side * 14f * u, ey + 34f * u + ph * 80f * u)
+                          )
+                      }
+                  }
+
+                  // mouth
+                  var openEff = open
+                  var smileEff = smile
+                  if (st == OrbState.SPEAKING) {
+                      openEff = max(open, 0.08f) + 0.45f * (0.5f + 0.5f * sin(t * 13f))
+                      if (smileEff < 0.2f) smileEff = 0.2f
+                  } else if (st == OrbState.LISTENING) {
+                      openEff = max(open, 0.04f + lv * 0.3f)
+                  }
+                  val my = cy + 78f * u
+                  val mw = 112f * u * (1f - 0.25f * openEff)
+                  val left = cx - mw / 2f
+                  val right = cx + mw / 2f
+                  val ctrlTop = my + smileEff * 44f * u
+                  if (openEff > 0.08f) {
+                      val full = Path().apply {
+                          moveTo(left, my)
+                          quadraticBezierTo(cx, ctrlTop, right, my)
+                          quadraticBezierTo(cx, ctrlTop + openEff * 120f * u, left, my)
+                          close()
+                      }
+                      drawPath(full, color.copy(alpha = 0.92f))
+                      drawPath(full, color, style = Stroke(width = 6f * u, join = StrokeJoin.Round))
+                  } else {
+                      val line = Path().apply {
+                          moveTo(left, my)
+                          quadraticBezierTo(cx, ctrlTop, right, my)
+                      }
+                      drawPath(line, color, style = Stroke(width = 9f * u, cap = StrokeCap.Round))
                   }
               }
           }
@@ -3489,6 +3905,24 @@ jobs:
               DisposableEffect(owner) {
                   val observer = LifecycleEventObserver { _, event ->
                       if (event == Lifecycle.Event.ON_RESUME) state.value = android.provider.Settings.canDrawOverlays(ctx)
+                  }
+                  owner.lifecycle.addObserver(observer)
+                  onDispose { owner.lifecycle.removeObserver(observer) }
+              }
+              return state
+          }
+
+          /** True while Do Not Disturb access is allowed. Re-checks when you come back to the app. */
+          @Composable
+          fun rememberPolicyGranted(): State<Boolean> {
+              val ctx = LocalContext.current
+              fun now() = (ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                  .isNotificationPolicyAccessGranted
+              val state = remember { mutableStateOf(now()) }
+              val owner = LocalLifecycleOwner.current
+              DisposableEffect(owner) {
+                  val observer = LifecycleEventObserver { _, event ->
+                      if (event == Lifecycle.Event.ON_RESUME) state.value = now()
                   }
                   owner.lifecycle.addObserver(observer)
                   onDispose { owner.lifecycle.removeObserver(observer) }
@@ -3770,6 +4204,7 @@ jobs:
               val contacts by rememberGranted(Manifest.permission.READ_CONTACTS)
               val phone by rememberGranted(Manifest.permission.CALL_PHONE)
               val overlay by rememberOverlayGranted()
+              val policy by rememberPolicyGranted()
               val notif by rememberGranted(
                   if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else Manifest.permission.INTERNET
               )
@@ -3817,6 +4252,19 @@ jobs:
                   ) {
                       try {
                           val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.fromParts("package", ctx.packageName, null))
+                          i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                          ctx.startActivity(i)
+                      } catch (e: Exception) {
+                      }
+                  }
+
+                  PermissionCard(
+                      pick(hindi, "परेशान न करें की अनुमति", "DO NOT DISTURB ACCESS"),
+                      pick(hindi, "माइक खुलते समय की \"टन\" आवाज़ पूरी तरह बंद करने के लिए।", "To fully silence the \"ding\" when the mic opens."),
+                      policy, hindi
+                  ) {
+                      try {
+                          val i = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
                           i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                           ctx.startActivity(i)
                       } catch (e: Exception) {
@@ -3923,6 +4371,20 @@ jobs:
               val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
                   if (granted) vm.setWake(true)
               }
+              fun voiceLabel(lang: String, name: String): String {
+                  if (name.isBlank()) return pick(hindi, "डिफ़ॉल्ट", "Default")
+                  return vm.voiceChoices(lang).firstOrNull { it.first == name }?.second ?: "Custom"
+              }
+
+              fun cycleVoice(lang: String) {
+                  val isHi = lang == "hi"
+                  val names = listOf("") + vm.voiceChoices(lang).map { it.first }
+                  val cur = if (isHi) prefs.voiceHi else prefs.voiceEn
+                  val next = names[(names.indexOf(cur).coerceAtLeast(0) + 1) % names.size]
+                  vm.set(if (isHi) K.voiceHi else K.voiceEn, next)
+                  vm.previewVoice(isHi, if (isHi) next else prefs.voiceHi, if (isHi) prefs.voiceEn else next, prefs.pitch)
+              }
+
               var keyText by remember { mutableStateOf(prefs.apiKey) }
               var nameText by remember { mutableStateOf(prefs.userName) }
               var keySaved by remember { mutableStateOf(false) }
@@ -4019,6 +4481,32 @@ jobs:
                           val idx = steps.indexOfFirst { it >= prefs.speed - 0.01f }
                           val next = if (idx < 0 || idx >= steps.size - 1) steps[0] else steps[idx + 1]
                           vm.set(K.speed, next)
+                      })
+                  }
+
+                  SettingRow(
+                      pick(hindi, "हिंदी आवाज़", "Hindi voice"),
+                      pick(hindi, "छूने पर अगली आवाज़ सुनाई देगी", "Tap to hear the next voice")
+                  ) {
+                      GlassButton(voiceLabel("hi", prefs.voiceHi), { cycleVoice("hi") })
+                  }
+                  SettingRow(
+                      pick(hindi, "अंग्रेज़ी आवाज़", "English voice"),
+                      pick(hindi, "छूने पर अगली आवाज़ सुनाई देगी", "Tap to hear the next voice")
+                  ) {
+                      GlassButton(voiceLabel("en", prefs.voiceEn), { cycleVoice("en") })
+                  }
+                  SettingRow(
+                      pick(hindi, "आवाज़ का भारीपन", "Voice pitch"),
+                      pick(hindi, "कम = भारी, ज़्यादा = पतली", "Lower = deeper, higher = lighter"),
+                      divider = false
+                  ) {
+                      GlassButton(prefs.pitch.toString(), {
+                          val steps = listOf(0.8f, 0.9f, 1.0f, 1.1f, 1.25f)
+                          val idx = steps.indexOfFirst { it >= prefs.pitch - 0.01f }
+                          val next = if (idx < 0 || idx >= steps.size - 1) steps[0] else steps[idx + 1]
+                          vm.set(K.pitch, next)
+                          vm.previewVoice(hindi, prefs.voiceHi, prefs.voiceEn, next)
                       })
                   }
 
@@ -4508,32 +4996,76 @@ jobs:
               // The phone plays a "ding" when listening starts and stops. Keep the music stream quiet meanwhile.
               private val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
               private val handler = Handler(Looper.getMainLooper())
-              private var muted = false
+              private var mutedStreams: List<Int> = emptyList()
+              private var savedRinger = AudioManager.RINGER_MODE_NORMAL
               private val failsafe = Runnable { unmuteBeeps() }
+              private val memory = ctx.getSharedPreferences("jarvis_audio", Context.MODE_PRIVATE)
 
+              /** Music is always quiet-able. The ding of some phones plays on other streams, which needs Do Not Disturb access. */
               private fun muteBeeps() {
-                  if (muted) return
-                  try {
-                      if (!audio.isStreamMute(AudioManager.STREAM_MUSIC)) {
-                          audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_MUTE, 0)
-                          muted = true
-                          handler.postDelayed(failsafe, 10000)
+                  if (mutedStreams.isNotEmpty()) return
+                  val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                  val streams = if (nm.isNotificationPolicyAccessGranted) {
+                      listOf(AudioManager.STREAM_MUSIC, AudioManager.STREAM_NOTIFICATION, AudioManager.STREAM_SYSTEM)
+                  } else {
+                      listOf(AudioManager.STREAM_MUSIC)
+                  }
+                  savedRinger = audio.ringerMode
+                  val done = ArrayList<Int>()
+                  for (s in streams) {
+                      try {
+                          if (!audio.isStreamMute(s)) {
+                              audio.adjustStreamVolume(s, AudioManager.ADJUST_MUTE, 0)
+                              done.add(s)
+                          }
+                      } catch (e: Exception) {
                       }
-                  } catch (e: Exception) {
+                  }
+                  mutedStreams = done
+                  if (done.isNotEmpty()) {
+                      // remember it on disk: if the app dies while listening, the next start puts the sound back
+                      memory.edit().putString("muted", done.joinToString(",")).apply()
+                      handler.postDelayed(failsafe, 10000)
                   }
               }
 
               private fun unmuteBeeps() {
                   handler.removeCallbacks(failsafe)
-                  if (!muted) return
-                  muted = false
+                  if (mutedStreams.isEmpty()) return
+                  val list = mutedStreams
+                  mutedStreams = emptyList()
+                  for (s in list) {
+                      try {
+                          audio.adjustStreamVolume(s, AudioManager.ADJUST_UNMUTE, 0)
+                      } catch (e: Exception) {
+                      }
+                  }
                   try {
-                      audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_UNMUTE, 0)
+                      if (audio.ringerMode != savedRinger) audio.ringerMode = savedRinger
                   } catch (e: Exception) {
                   }
+                  memory.edit().remove("muted").apply()
               }
 
-              fun available(): Boolean = SpeechRecognizer.isRecognitionAvailable(ctx)
+              companion object {
+                  /** Called when the app starts: put back any sound that was left muted. */
+                  fun restoreSound(ctx: Context) {
+                      try {
+                          val memory = ctx.getSharedPreferences("jarvis_audio", Context.MODE_PRIVATE)
+                          val saved = memory.getString("muted", null) ?: return
+                          val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                          for (part in saved.split(",")) {
+                              val s = part.toIntOrNull() ?: continue
+                              try {
+                                  audio.adjustStreamVolume(s, AudioManager.ADJUST_UNMUTE, 0)
+                              } catch (e: Exception) {
+                              }
+                          }
+                          memory.edit().remove("muted").apply()
+                      } catch (e: Exception) {
+                      }
+                  }
+              }
 
               /** Prefer Google's own recognizer when the phone has it: some phone makers' default one keeps disconnecting. */
               private fun createRecognizer(): SpeechRecognizer {
@@ -4661,7 +5193,14 @@ jobs:
               }
 
               /** Returns true if speech was started. */
-              fun speak(text: String, rate: Float, male: Boolean = false): Boolean {
+              fun speak(
+                  text: String,
+                  rate: Float,
+                  male: Boolean = false,
+                  voiceHi: String = "",
+                  voiceEn: String = "",
+                  pitch: Float = 1.0f
+              ): Boolean {
                   val engine = tts
                   if (!ready || engine == null || text.isBlank()) return false
                   val hindi = text.any { it in 'ऀ'..'ॿ' }
@@ -4670,8 +5209,20 @@ jobs:
                   if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                       engine.setLanguage(Locale.ENGLISH)
                   }
+                  var chosen = false
+                  val wantedName = if (hindi) voiceHi else voiceEn
+                  if (wantedName.isNotBlank()) {
+                      try {
+                          val v = engine.voices?.firstOrNull { it.name == wantedName }
+                          if (v != null) {
+                              engine.setVoice(v)
+                              chosen = true
+                          }
+                      } catch (e: Exception) {
+                      }
+                  }
                   var maleFound = false
-                  if (male) {
+                  if (male && !chosen) {
                       val v = pickMaleVoice(engine, wanted)
                       if (v != null) {
                           try {
@@ -4682,9 +5233,34 @@ jobs:
                       }
                   }
                   // no male voice installed: a lower pitch is the next best thing
-                  engine.setPitch(if (male && !maleFound) 0.78f else 1.0f)
+                  engine.setPitch(pitch.coerceIn(0.5f, 2.0f) * (if (male && !chosen && !maleFound) 0.78f else 1.0f))
                   engine.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
                   return engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis") == TextToSpeech.SUCCESS
+              }
+
+              /** The voices installed on this phone for a language ("hi" or "en"): (technical name, friendly label). */
+              fun voices(lang: String): List<Pair<String, String>> {
+                  val engine = tts ?: return emptyList()
+                  if (!ready) return emptyList()
+                  val all = try {
+                      engine.voices
+                  } catch (e: Exception) {
+                      null
+                  } ?: return emptyList()
+                  val maleCodes = setOf("enb", "end", "hib", "hic")
+                  val list = all.filter { it.locale.language == lang }
+                      .sortedWith(compareBy<Voice>({ it.locale.country != "IN" }, { it.isNetworkConnectionRequired }, { it.name }))
+                  return list.mapIndexed { i, v ->
+                      val name = v.name.lowercase()
+                      val code = name.substringAfter("-x-", "").substringBefore('-')
+                      val sex = when {
+                          (name.contains("male") && !name.contains("female")) || code in maleCodes -> "male"
+                          name.contains("female") -> "female"
+                          else -> ""
+                      }
+                      val label = "Voice " + (i + 1) + (if (sex.isNotEmpty()) " ($sex)" else "") + (if (v.isNetworkConnectionRequired) " online" else "")
+                      Pair(v.name, label)
+                  }
               }
 
               /** Looks for a male voice of this language among the voices installed on the phone. */
@@ -5042,7 +5618,6 @@ jobs:
                           .setContentText("I heard you. Tap to talk.")
                           .setContentIntent(pi)
                           .setAutoCancel(true)
-                          .setCategory(Notification.CATEGORY_CALL)
                           .build()
                       val nm = getSystemService(NotificationManager::class.java)
                       nm.notify(2, n)
@@ -5055,7 +5630,10 @@ jobs:
               private fun goForeground() {
                   val nm = getSystemService(NotificationManager::class.java)
                   nm.createNotificationChannel(NotificationChannel(CH_LISTEN, "Wake word", NotificationManager.IMPORTANCE_LOW))
-                  nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Jarvis heard you", NotificationManager.IMPORTANCE_HIGH))
+                  nm.createNotificationChannel(NotificationChannel(CH_ALERT, "Jarvis heard you", NotificationManager.IMPORTANCE_HIGH).apply {
+                      setSound(null, null)          // no ding
+                      enableVibration(false)
+                  })
                   val pi = PendingIntent.getActivity(
                       this, 0, Intent(this, MainActivity::class.java),
                       PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -5076,7 +5654,7 @@ jobs:
 
               companion object {
                   private const val CH_LISTEN = "wake_listen"
-                  private const val CH_ALERT = "wake_alert"
+                  private const val CH_ALERT = "wake_alert_silent"
                   private const val GRAMMAR = "[\"hey jarvis\", \"jarvis\", \"hey travis\", \"[unk]\"]"
               }
           }
@@ -5103,7 +5681,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAKhx/WoC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAH4DAWsC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -5269,7 +5847,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAKhx/WoC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAH4DAWsC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -5459,7 +6037,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAKhx/WoC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAH4DAWsC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -5657,7 +6235,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAKhx/WoC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAH4DAWsC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -5878,7 +6456,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAKhx/WoC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAH4DAWsC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
