@@ -2382,7 +2382,8 @@ jobs:
           import androidx.compose.animation.fadeIn
           import androidx.compose.animation.fadeOut
           import androidx.compose.animation.core.tween
-          import androidx.compose.animation.slideInHorizontally
+          import androidx.compose.animation.scaleIn
+          import androidx.compose.animation.scaleOut
           import androidx.compose.foundation.layout.Box
           import androidx.compose.foundation.layout.navigationBarsPadding
           import androidx.compose.foundation.layout.padding
@@ -2476,10 +2477,10 @@ jobs:
                   NavHost(
                       navController = nav,
                       startDestination = SPLASH,
-                      enterTransition = { fadeIn(tween(240)) + slideInHorizontally(tween(240)) { it / 14 } },
-                      exitTransition = { fadeOut(tween(160)) },
-                      popEnterTransition = { fadeIn(tween(240)) },
-                      popExitTransition = { fadeOut(tween(160)) }
+                      enterTransition = { fadeIn(tween(320)) + scaleIn(initialScale = 0.94f, animationSpec = tween(320)) },
+                      exitTransition = { fadeOut(tween(180)) },
+                      popEnterTransition = { fadeIn(tween(320)) + scaleIn(initialScale = 0.97f, animationSpec = tween(320)) },
+                      popExitTransition = { fadeOut(tween(180)) + scaleOut(targetScale = 0.96f, animationSpec = tween(180)) }
                   ) {
                       composable(SPLASH) {
                           SplashScreen(onDone = {
@@ -2628,8 +2629,9 @@ jobs:
               val listState = rememberLazyListState()
               var text by remember { mutableStateOf("") }
 
-              LaunchedEffect(messages.size) {
-                  if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+              LaunchedEffect(messages.size, orb == OrbState.THINKING) {
+                  val count = messages.size + (if (orb == OrbState.THINKING) 1 else 0)
+                  if (count > 0) listState.animateScrollToItem(count - 1)
               }
 
               val status = when (orb) {
@@ -2676,6 +2678,9 @@ jobs:
                                       CardTap.NONE -> {}
                                   }
                               }
+                          }
+                          if (orb == OrbState.THINKING) {
+                              item(key = "typing") { TypingDots() }
                           }
                       }
                   }
@@ -2921,6 +2926,11 @@ jobs:
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.compose.animation.core.animateFloat
+          import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.spring
+          import androidx.compose.animation.animateContentSize
+          import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+          import androidx.compose.ui.platform.LocalHapticFeedback
           import com.jarvis.app.Brand
           import kotlin.math.PI
           import kotlin.math.abs
@@ -2977,6 +2987,13 @@ jobs:
                           .fillMaxSize()
                           .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
                           .drawBehind {
+                              drawRect(
+                                  Brush.radialGradient(
+                                      colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
+                                      center = Offset(size.width / 2f, size.height / 2f),
+                                      radius = size.maxDimension * 0.75f
+                                  )
+                              )
                               val step = 26.dp.toPx()
                               val radius = 0.8.dp.toPx()
                               var y = 0f
@@ -3056,14 +3073,25 @@ jobs:
           fun Modifier.pressable(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
               val source = remember { MutableInteractionSource() }
               val pressed by source.collectIsPressedAsState()
+              val haptic = LocalHapticFeedback.current
+              val scale by animateFloatAsState(
+                  if (pressed) 0.95f else 1f,
+                  spring(dampingRatio = 0.55f, stiffness = 700f),
+                  label = "press"
+              )
               this
                   .graphicsLayer {
-                      val s = if (pressed) 0.96f else 1f
-                      scaleX = s
-                      scaleY = s
-                      alpha = if (pressed) 0.75f else 1f
+                      scaleX = scale
+                      scaleY = scale
+                      alpha = if (pressed) 0.8f else 1f
                   }
-                  .clickable(interactionSource = source, indication = null, enabled = enabled, onClick = onClick)
+                  .clickable(interactionSource = source, indication = null, enabled = enabled, onClick = {
+                      try {
+                          haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                      } catch (e: Exception) {
+                      }
+                      onClick()
+                  })
           }
 
           // ---------------------------------------------------------------------------- top bar
@@ -3152,16 +3180,24 @@ jobs:
           fun Dock(selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
               val accent = LocalAccent.current
               val shape = RoundedCornerShape(36.dp)
+              val items = listOf(
+                  "HOME" to IconKind.HOME,
+                  "FACE" to IconKind.FACE,
+                  "CHAT" to IconKind.CHAT,
+                  "TASKS" to IconKind.TASKS,
+                  "SKILLS" to IconKind.SKILLS
+              )
               Row(
                   modifier
                       .glassPill(shape, accent)
                       .padding(6.dp),
-                  horizontalArrangement = Arrangement.spacedBy(4.dp)
+                  horizontalArrangement = Arrangement.spacedBy(2.dp),
+                  verticalAlignment = Alignment.CenterVertically
               ) {
-                  for (item in listOf("HOME", "FACE", "CHAT", "TASKS", "SKILLS")) {
-                      val on = item == selected
+                  for ((key, kind) in items) {
+                      val on = key == selected
                       val itemShape = RoundedCornerShape(30.dp)
-                      Box(
+                      Row(
                           Modifier
                               .height(48.dp)
                               .clip(itemShape)
@@ -3171,17 +3207,22 @@ jobs:
                                       .border(1.dp, JC.Rim, itemShape)
                                   else Modifier
                               )
-                              .pressable { onSelect(item) }
-                              .padding(horizontal = 10.dp),
-                          contentAlignment = Alignment.Center
+                              .pressable { onSelect(key) }
+                              .animateContentSize(spring(dampingRatio = 0.8f, stiffness = 420f))
+                              .padding(horizontal = if (on) 14.dp else 12.dp),
+                          verticalAlignment = Alignment.CenterVertically
                       ) {
-                          Text(
-                              item,
-                              style = JT.label.copy(letterSpacing = 1.sp),
-                              color = if (on) JC.OnAccent else Color(0xFFCCCCCC),
-                              fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                              maxLines = 1
-                          )
+                          JIcon(kind, if (on) JC.OnAccent else Color(0xFFD0D0D0), 22.dp)
+                          if (on) {
+                              Text(
+                                  key,
+                                  style = JT.label.copy(letterSpacing = 1.sp),
+                                  color = JC.OnAccent,
+                                  fontWeight = FontWeight.Bold,
+                                  maxLines = 1,
+                                  modifier = Modifier.padding(start = 8.dp)
+                              )
+                          }
                       }
                   }
               }
@@ -3752,7 +3793,7 @@ jobs:
                   }
 
                   Spacer(Modifier.height(24.dp))
-                  Orb(state = orb, level = level, onClick = mic)
+                  Orb(state = orb, level = level, diameter = 230.dp, onClick = mic)
                   Spacer(Modifier.height(18.dp))
                   Text(
                       caption,
@@ -3765,26 +3806,36 @@ jobs:
                   Waveform(active = orb == OrbState.LISTENING || orb == OrbState.SPEAKING, level = if (orb == OrbState.LISTENING) level else 0.5f)
                   Spacer(Modifier.height(20.dp))
 
-                  FlowRow(
-                      Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                      verticalArrangement = Arrangement.spacedBy(8.dp)
-                  ) {
-                      val chips = if (hindi) listOf(
-                          Triple("अलार्म", "सुबह 7 बजे", "सुबह 7 बजे का अलार्म लगाओ"),
-                          Triple("कॉल", "मम्मी को", "मम्मी को कॉल करो"),
-                          Triple("संगीत", "गाना चलाओ", "गाना चलाओ"),
-                          Triple("टॉर्च", "चालू करो", "टॉर्च चालू करो")
-                      ) else listOf(
-                          Triple("ALARM", "Wake me at 7", "Set an alarm for 7 AM"),
-                          Triple("CALL", "Call Mummy", "Call Mummy"),
-                          Triple("MUSIC", "Play music", "Play music"),
-                          Triple("TORCH", "Turn on", "Turn on the torch")
-                      )
-                      for (chip in chips) {
-                          TagChip(chip.first, chip.second) {
-                              vm.submit(chip.third)
-                              onChat()
+                  val tiles = if (hindi) listOf(
+                      listOf(Triple(IconKind.ALARM, "अलार्म", "सुबह 7 बजे"), Triple(IconKind.CALL, "कॉल", "मम्मी को")),
+                      listOf(Triple(IconKind.MUSIC, "संगीत", "गाना चलाओ"), Triple(IconKind.TORCH, "टॉर्च", "चालू करो"))
+                  ) else listOf(
+                      listOf(Triple(IconKind.ALARM, "Alarm", "WAKE ME AT 7"), Triple(IconKind.CALL, "Call", "CALL MUMMY")),
+                      listOf(Triple(IconKind.MUSIC, "Music", "PLAY MUSIC"), Triple(IconKind.TORCH, "Torch", "TURN ON"))
+                  )
+                  val says = if (hindi) listOf(
+                      listOf("सुबह 7 बजे का अलार्म लगाओ", "मम्मी को कॉल करो"),
+                      listOf("गाना चलाओ", "टॉर्च चालू करो")
+                  ) else listOf(
+                      listOf("Set an alarm for 7 AM", "Call Mummy"),
+                      listOf("Play music", "Turn on the torch")
+                  )
+                  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                      for (r in 0..1) {
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                              for (c in 0..1) {
+                                  val t = tiles[r][c]
+                                  QuickTile(
+                                      kind = t.first,
+                                      title = t.second,
+                                      sub = t.third,
+                                      onClick = {
+                                          vm.submit(says[r][c])
+                                          onChat()
+                                      },
+                                      modifier = Modifier.weight(1f).enter(r * 2 + c)
+                                  )
+                              }
                           }
                       }
                   }
@@ -3845,6 +3896,150 @@ jobs:
                   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                       GlassButton(pick(hindi, "कॉपी", "COPY"), { clipboard.setText(AnnotatedString(text)) })
                       GlassButton(pick(hindi, "हटाएँ", "DISMISS"), onDismiss)
+                  }
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/ui"
+          cat > app/src/main/java/com/jarvis/app/ui/Icons.kt <<'JARVIS_EOF'
+          package com.jarvis.app.ui
+
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.runtime.Composable
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.geometry.CornerRadius
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.StrokeCap
+          import androidx.compose.ui.graphics.StrokeJoin
+          import androidx.compose.ui.graphics.drawscope.Stroke
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+
+          /** The icons of the app. Drawn by hand, so they stay sharp and take the glow color. */
+          enum class IconKind { HOME, FACE, CHAT, TASKS, SKILLS, ALARM, CALL, MUSIC, TORCH, MIC }
+
+          @Composable
+          fun JIcon(kind: IconKind, color: Color, size: Dp = 22.dp, modifier: Modifier = Modifier) {
+              Canvas(modifier.size(size)) {
+                  val w = this.size.width
+                  val h = this.size.height
+                  val sw = w * 0.09f
+                  val line = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                  when (kind) {
+                      IconKind.HOME -> {
+                          val roof = Path().apply {
+                              moveTo(w * 0.12f, h * 0.48f)
+                              lineTo(w * 0.5f, h * 0.15f)
+                              lineTo(w * 0.88f, h * 0.48f)
+                          }
+                          drawPath(roof, color, style = line)
+                          val body = Path().apply {
+                              moveTo(w * 0.24f, h * 0.42f)
+                              lineTo(w * 0.24f, h * 0.84f)
+                              lineTo(w * 0.76f, h * 0.84f)
+                              lineTo(w * 0.76f, h * 0.42f)
+                          }
+                          drawPath(body, color, style = line)
+                          val door = Path().apply {
+                              moveTo(w * 0.42f, h * 0.84f)
+                              lineTo(w * 0.42f, h * 0.62f)
+                              lineTo(w * 0.58f, h * 0.62f)
+                              lineTo(w * 0.58f, h * 0.84f)
+                          }
+                          drawPath(door, color, style = line)
+                      }
+                      IconKind.FACE -> {
+                          drawCircle(color, radius = w * 0.38f, center = Offset(w / 2f, h / 2f), style = line)
+                          drawCircle(color, radius = sw * 0.75f, center = Offset(w * 0.38f, h * 0.43f))
+                          drawCircle(color, radius = sw * 0.75f, center = Offset(w * 0.62f, h * 0.43f))
+                          drawArc(
+                              color, startAngle = 25f, sweepAngle = 130f, useCenter = false,
+                              topLeft = Offset(w * 0.3f, h * 0.34f), size = Size(w * 0.4f, h * 0.34f), style = line
+                          )
+                      }
+                      IconKind.CHAT -> {
+                          drawRoundRect(
+                              color, topLeft = Offset(w * 0.13f, h * 0.17f), size = Size(w * 0.74f, h * 0.52f),
+                              cornerRadius = CornerRadius(w * 0.16f), style = line
+                          )
+                          val tail = Path().apply {
+                              moveTo(w * 0.34f, h * 0.69f)
+                              lineTo(w * 0.28f, h * 0.87f)
+                              lineTo(w * 0.52f, h * 0.69f)
+                          }
+                          drawPath(tail, color, style = line)
+                          for (i in 0..2) drawCircle(color, sw * 0.6f, Offset(w * (0.36f + 0.14f * i), h * 0.43f))
+                      }
+                      IconKind.TASKS -> {
+                          for (i in 0..2) {
+                              val y = h * (0.24f + 0.26f * i)
+                              drawCircle(color, w * 0.065f, Offset(w * 0.2f, y), style = line)
+                              drawLine(color, Offset(w * 0.4f, y), Offset(w * 0.86f, y), sw, StrokeCap.Round)
+                          }
+                      }
+                      IconKind.SKILLS -> {
+                          val star = Path().apply {
+                              moveTo(w * 0.5f, h * 0.08f)
+                              quadraticBezierTo(w * 0.54f, h * 0.46f, w * 0.92f, h * 0.5f)
+                              quadraticBezierTo(w * 0.54f, h * 0.54f, w * 0.5f, h * 0.92f)
+                              quadraticBezierTo(w * 0.46f, h * 0.54f, w * 0.08f, h * 0.5f)
+                              quadraticBezierTo(w * 0.46f, h * 0.46f, w * 0.5f, h * 0.08f)
+                              close()
+                          }
+                          drawPath(star, color, style = line)
+                      }
+                      IconKind.ALARM -> {
+                          drawCircle(color, radius = w * 0.33f, center = Offset(w / 2f, h * 0.55f), style = line)
+                          drawLine(color, Offset(w / 2f, h * 0.55f), Offset(w / 2f, h * 0.38f), sw, StrokeCap.Round)
+                          drawLine(color, Offset(w / 2f, h * 0.55f), Offset(w * 0.62f, h * 0.62f), sw, StrokeCap.Round)
+                          drawLine(color, Offset(w * 0.12f, h * 0.2f), Offset(w * 0.26f, h * 0.1f), sw, StrokeCap.Round)
+                          drawLine(color, Offset(w * 0.88f, h * 0.2f), Offset(w * 0.74f, h * 0.1f), sw, StrokeCap.Round)
+                      }
+                      IconKind.CALL -> {
+                          drawArc(
+                              color, startAngle = 205f, sweepAngle = 130f, useCenter = false,
+                              topLeft = Offset(w * 0.1f, h * 0.18f), size = Size(w * 0.8f, h * 0.8f),
+                              style = Stroke(width = sw * 2.2f, cap = StrokeCap.Round)
+                          )
+                          drawCircle(color, sw * 1.2f, Offset(w * 0.2f, h * 0.7f))
+                          drawCircle(color, sw * 1.2f, Offset(w * 0.8f, h * 0.7f))
+                      }
+                      IconKind.MUSIC -> {
+                          drawCircle(color, radius = w * 0.14f, center = Offset(w * 0.36f, h * 0.74f))
+                          drawLine(color, Offset(w * 0.5f, h * 0.72f), Offset(w * 0.5f, h * 0.2f), sw, StrokeCap.Round)
+                          val flag = Path().apply {
+                              moveTo(w * 0.5f, h * 0.2f)
+                              quadraticBezierTo(w * 0.62f, h * 0.36f, w * 0.8f, h * 0.34f)
+                          }
+                          drawPath(flag, color, style = line)
+                      }
+                      IconKind.TORCH -> {
+                          val bolt = Path().apply {
+                              moveTo(w * 0.58f, h * 0.08f)
+                              lineTo(w * 0.28f, h * 0.55f)
+                              lineTo(w * 0.48f, h * 0.55f)
+                              lineTo(w * 0.42f, h * 0.92f)
+                              lineTo(w * 0.74f, h * 0.42f)
+                              lineTo(w * 0.54f, h * 0.42f)
+                              close()
+                          }
+                          drawPath(bolt, color, style = line)
+                      }
+                      IconKind.MIC -> {
+                          drawRoundRect(
+                              color, topLeft = Offset(w * 0.36f, h * 0.08f), size = Size(w * 0.28f, h * 0.5f),
+                              cornerRadius = CornerRadius(w * 0.14f), style = line
+                          )
+                          drawArc(
+                              color, startAngle = 0f, sweepAngle = 180f, useCenter = false,
+                              topLeft = Offset(w * 0.22f, h * 0.3f), size = Size(w * 0.56f, h * 0.44f), style = line
+                          )
+                          drawLine(color, Offset(w * 0.5f, h * 0.74f), Offset(w * 0.5f, h * 0.92f), sw, StrokeCap.Round)
+                      }
                   }
               }
           }
@@ -4314,6 +4509,139 @@ jobs:
           }
           JARVIS_EOF
           mkdir -p "app/src/main/java/com/jarvis/app/ui"
+          cat > app/src/main/java/com/jarvis/app/ui/Premium.kt <<'JARVIS_EOF'
+          package com.jarvis.app.ui
+
+          import androidx.compose.animation.core.Animatable
+          import androidx.compose.animation.core.FastOutSlowInEasing
+          import androidx.compose.animation.core.LinearEasing
+          import androidx.compose.animation.core.RepeatMode
+          import androidx.compose.animation.core.infiniteRepeatable
+          import androidx.compose.animation.core.rememberInfiniteTransition
+          import androidx.compose.animation.core.tween
+          import androidx.compose.animation.core.animateFloat
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.ColumnScope
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.offset
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.LaunchedEffect
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.remember
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.composed
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.graphicsLayer
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.delay
+          import kotlin.math.PI
+          import kotlin.math.sin
+
+          /** Things slide up and fade in one after another when a screen opens. index = the order. */
+          fun Modifier.enter(index: Int = 0): Modifier = composed {
+              val reduce = LocalReduceMotion.current
+              val a = remember { Animatable(if (reduce) 1f else 0f) }
+              LaunchedEffect(Unit) {
+                  if (!reduce) {
+                      delay(index * 70L)
+                      a.animateTo(1f, tween(480, easing = FastOutSlowInEasing))
+                  }
+              }
+              this.graphicsLayer {
+                  alpha = a.value
+                  translationY = (1f - a.value) * 26.dp.toPx()
+              }
+          }
+
+          /** A rounded liquid-glass panel that groups several rows. */
+          @Composable
+          fun GlassCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+              Column(
+                  modifier
+                      .fillMaxWidth()
+                      .glass(RoundedCornerShape(26.dp))
+                      .padding(horizontal = 16.dp, vertical = 6.dp),
+                  content = content
+              )
+          }
+
+          /** A big tappable tile with an icon: the quick actions on the Home screen. */
+          @Composable
+          fun QuickTile(kind: IconKind, title: String, sub: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+              val accent = LocalAccent.current
+              val shape = RoundedCornerShape(26.dp)
+              Column(
+                  modifier
+                      .pressable(onClick = onClick)
+                      .glass(shape)
+                      .padding(16.dp),
+                  verticalArrangement = Arrangement.spacedBy(14.dp)
+              ) {
+                  Box(
+                      Modifier
+                          .size(46.dp)
+                          .clip(CircleShape)
+                          .background(Brush.verticalGradient(listOf(accent.copy(alpha = 0.34f), accent.copy(alpha = 0.08f))), CircleShape)
+                          .border(1.dp, accent.copy(alpha = 0.55f), CircleShape),
+                      contentAlignment = Alignment.Center
+                  ) {
+                      JIcon(kind, accent, 22.dp)
+                  }
+                  Column {
+                      Text(title, color = Color.White, fontFamily = Inter, fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
+                      Text(sub, color = JC.Dim, style = JT.tiny, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                  }
+              }
+          }
+
+          /** Three bouncing dots: Jarvis is thinking. */
+          @Composable
+          fun TypingDots(modifier: Modifier = Modifier) {
+              val accent = LocalAccent.current
+              val reduce = LocalReduceMotion.current
+              val t = rememberInfiniteTransition(label = "dots")
+              val phase by t.animateFloat(
+                  initialValue = 0f,
+                  targetValue = (2 * PI).toFloat(),
+                  animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
+                  label = "dotsPhase"
+              )
+              val shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomEnd = 22.dp, bottomStart = 6.dp)
+              Row(
+                  modifier
+                      .glass(shape)
+                      .padding(horizontal = 18.dp, vertical = 16.dp),
+                  horizontalArrangement = Arrangement.spacedBy(7.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  for (i in 0..2) {
+                      val lift = if (reduce) 0f else sin(phase - i * 0.9f).coerceAtLeast(0f) * 6f
+                      Box(
+                          Modifier
+                              .offset(y = (-lift).dp)
+                              .size(8.dp)
+                              .clip(CircleShape)
+                              .background(accent.copy(alpha = 0.6f + 0.4f * (lift / 6f)))
+                      )
+                  }
+              }
+          }
+          JARVIS_EOF
+          mkdir -p "app/src/main/java/com/jarvis/app/ui"
           cat > app/src/main/java/com/jarvis/app/ui/SettingsScreen.kt <<'JARVIS_EOF'
           package com.jarvis.app.ui
 
@@ -4445,6 +4773,7 @@ jobs:
 
                   // ---- voice
                   SectionLabel(pick(hindi, "आवाज़", "VOICE"))
+                  GlassCard {
                   SettingRow(
                       pick(hindi, "\"Hey Jarvis\" वेक वर्ड", "\"Hey Jarvis\" wake word"),
                       when {
@@ -4510,6 +4839,8 @@ jobs:
                       })
                   }
 
+                  }
+
                   // ---- brain
                   SectionLabel(pick(hindi, "स्मार्ट जवाब (Gemini)", "SMART ANSWERS (GEMINI)"))
                   Text(
@@ -4569,11 +4900,14 @@ jobs:
                   }
 
                   SectionLabel(pick(hindi, "कॉल", "CALLS"))
+                  GlassCard {
                   SettingRow(
                       pick(hindi, "सीधे कॉल लगाओ", "Call directly"),
                       pick(hindi, "बंद हो तो पहले डायल स्क्रीन खुलती है", "When off, the dialer opens first"),
                       divider = false
                   ) { JSwitch(prefs.callDirect) { vm.set(K.callDirect, it) } }
+
+                  }
 
                   // ---- glow color
                   SectionLabel(pick(hindi, "चमक का रंग", "GLOW COLOR"))
@@ -4657,6 +4991,7 @@ jobs:
 
                   SectionLabel(pick(hindi, "Jarvis क्या कर सकता है", "WHAT JARVIS CAN DO"))
 
+                  GlassCard(Modifier.enter(0)) {
                   SettingRow(
                       pick(hindi, "अलार्म और टाइमर", "Alarms and timers"),
                       pick(hindi, "\"सुबह 7 बजे उठाओ\"", "\"Wake me at 7\"")
@@ -4692,6 +5027,7 @@ jobs:
                       pick(hindi, "\"गूगल पर खोजो ...\"", "\"Search the web for ...\""),
                       divider = false
                   ) { JSwitch(prefs.skillWeb) { vm.set(K.skillWeb, it) } }
+                  }
               }
           }
           JARVIS_EOF
@@ -4700,6 +5036,7 @@ jobs:
           package com.jarvis.app.ui
 
           import androidx.compose.animation.core.animateFloatAsState
+          import androidx.compose.animation.core.spring
           import androidx.compose.animation.core.tween
           import androidx.compose.foundation.layout.Arrangement
           import androidx.compose.foundation.layout.Column
@@ -4726,7 +5063,9 @@ jobs:
           @Composable
           fun SplashScreen(onDone: () -> Unit) {
               var shown by remember { mutableStateOf(false) }
-              val a by animateFloatAsState(if (shown) 1f else 0f, tween(600), label = "splash")
+              val a by animateFloatAsState(if (shown) 1f else 0f, tween(700), label = "splash")
+              val grow by animateFloatAsState(if (shown) 1f else 0.55f, spring(dampingRatio = 0.5f, stiffness = 90f), label = "splashGrow")
+              val spread by animateFloatAsState(if (shown) 8f else 24f, tween(1100), label = "splashSpread")
 
               LaunchedEffect(Unit) {
                   shown = true
@@ -4737,7 +5076,11 @@ jobs:
               Column(
                   Modifier
                       .fillMaxSize()
-                      .graphicsLayer { alpha = a },
+                      .graphicsLayer {
+                          alpha = a
+                          scaleX = grow
+                          scaleY = grow
+                      },
                   horizontalAlignment = Alignment.CenterHorizontally,
                   verticalArrangement = Arrangement.Center
               ) {
@@ -4747,7 +5090,7 @@ jobs:
                       color = Color.White,
                       fontFamily = Anton,
                       fontSize = 44.sp,
-                      letterSpacing = 8.sp,
+                      letterSpacing = spread.sp,
                       modifier = Modifier.padding(top = 28.dp)
                   )
                   Text(
@@ -5683,7 +6026,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAOFZAWsC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAJcKA2sC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -5849,7 +6192,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAOFZAWsC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAJcKA2sC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -6039,7 +6382,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAOFZAWsC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAJcKA2sC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -6237,7 +6580,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAOFZAWsC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAJcKA2sC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -6458,7 +6801,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAOFZAWsC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAJcKA2sC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
