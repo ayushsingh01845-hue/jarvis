@@ -2742,36 +2742,21 @@ jobs:
               val scale = if (listening) 1f + level * 0.12f else 1f
               Box(
                   Modifier
-                      .size(78.dp)
+                      .size(52.dp)
                       .graphicsLayer {
                           scaleX = scale
                           scaleY = scale
                       }
-                      .drawBehind {
-                          drawCircle(
-                              Brush.radialGradient(
-                                  listOf(accent.copy(alpha = 0.45f), Color.Transparent),
-                                  center = center,
-                                  radius = size.minDimension * 0.75f
-                              ),
-                              radius = size.minDimension * 0.75f
-                          )
-                      }
-                      .padding(6.dp)
                       .clip(CircleShape)
-                      .background(
-                          Brush.radialGradient(listOf(accent.copy(alpha = 0.95f), accent.copy(alpha = 0.55f))),
-                          CircleShape
-                      )
-                      .border(1.dp, JC.Rim, CircleShape)
+                      .background(if (listening) JC.Red else accent, CircleShape)
                       .pressable(onClick = onClick),
                   contentAlignment = Alignment.Center
               ) {
-                  Canvas(Modifier.size(30.dp)) {
-                      val c = JC.OnAccent
-                      val sw = 2.5.dp.toPx()
+                  Canvas(Modifier.size(24.dp)) {
+                      val c = Color.White
+                      val sw = 2.2.dp.toPx()
                       if (listening) {
-                          drawRoundRect(c, Offset(size.width * 0.2f, size.height * 0.2f), Size(size.width * 0.6f, size.height * 0.6f), CornerRadius(4.dp.toPx()))
+                          drawRoundRect(c, Offset(size.width * 0.22f, size.height * 0.22f), Size(size.width * 0.56f, size.height * 0.56f), CornerRadius(4.dp.toPx()))
                       } else {
                           drawRoundRect(c, Offset(size.width * 0.36f, size.height * 0.04f), Size(size.width * 0.28f, size.height * 0.5f), CornerRadius(size.width * 0.14f))
                           drawArc(
@@ -2813,25 +2798,24 @@ jobs:
                   if (m.fromUser) {
                       Text(
                           m.text,
-                          color = Color(0xFF001018),
+                          color = Color.White,
                           fontFamily = Inter,
-                          fontSize = 14.sp,
+                          fontSize = 16.sp,
                           modifier = Modifier
                               .widthIn(max = 300.dp)
                               .clip(shape)
-                              .background(Brush.horizontalGradient(listOf(accent.copy(alpha = 0.9f), accent.copy(alpha = 0.6f))), shape)
+                              .background(accent, shape)
                               .padding(horizontal = 16.dp, vertical = 11.dp)
                       )
                   } else {
                       Column(
                           Modifier
                               .widthIn(max = 320.dp)
-                              .glass(shape)
+                              .glass(shape, fill = JC.Raised)
                               .padding(horizontal = 16.dp, vertical = 11.dp),
                           verticalArrangement = Arrangement.spacedBy(6.dp)
                       ) {
-                          Text(Brand.NAME, color = accent, style = JT.tiny)
-                          Text(m.text, color = Color.White, fontFamily = Inter, fontSize = 14.sp, lineHeight = 20.sp)
+                          Text(m.text, color = Color.White, fontFamily = Inter, fontSize = 16.sp, lineHeight = 22.sp)
                           val card = m.card
                           if (card != null) ActionCardView(card, onCardTap)
                       }
@@ -2848,12 +2832,11 @@ jobs:
                   Modifier
                       .fillMaxWidth()
                       .clip(shape)
-                      .background(accent.copy(alpha = 0.08f), shape)
-                      .border(1.dp, accent.copy(alpha = 0.5f), shape)
+                      .background(Color.Black.copy(alpha = 0.35f), shape)
                       .then(if (card.tap != CardTap.NONE) Modifier.pressable { onTap(card.tap) } else Modifier)
                       .padding(horizontal = 14.dp, vertical = 10.dp)
               ) {
-                  Text(card.big, color = Color.White, fontFamily = Anton, fontSize = 26.sp, letterSpacing = 1.sp)
+                  Text(card.big, color = Color.White, fontFamily = Inter, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontSize = 26.sp)
                   Text(card.small, color = accent, style = JT.tiny)
                   if (card.sub.isNotBlank()) {
                       Text(card.sub, color = JC.Dim, fontFamily = Inter, fontSize = 11.sp, modifier = Modifier.padding(top = 2.dp))
@@ -2932,6 +2915,7 @@ jobs:
           import androidx.compose.ui.hapticfeedback.HapticFeedbackType
           import androidx.compose.ui.platform.LocalHapticFeedback
           import com.jarvis.app.Brand
+          import androidx.compose.foundation.layout.width
           import kotlin.math.PI
           import kotlin.math.abs
           import kotlin.math.cos
@@ -2939,135 +2923,25 @@ jobs:
 
           // ---------------------------------------------------------------------------- background
 
-          /** Pure black with two soft accent glows and a faint dot grid. */
+          /** Plain black, nothing else. */
           @Composable
           fun JarvisBackground(content: @Composable BoxScope.() -> Unit) {
-              val accent = LocalAccent.current
-              val reduce = LocalReduceMotion.current
-              val drift = rememberInfiniteTransition(label = "drift")
-              val phaseState = drift.animateFloat(
-                  initialValue = 0f,
-                  targetValue = (2 * PI).toFloat(),
-                  animationSpec = infiniteRepeatable(tween(18000, easing = LinearEasing), RepeatMode.Restart),
-                  label = "driftPhase"
-              )
-              Box(
-                  Modifier
-                      .fillMaxSize()
-                      .background(Color.Black)
-                      .drawBehind {
-                          // slowly drifting glows: they give the glass something to "refract"
-                          val ph = if (reduce) 0f else phaseState.value
-                          drawRect(
-                              Brush.radialGradient(
-                                  colors = listOf(accent.copy(alpha = 0.30f), Color.Transparent),
-                                  center = Offset(size.width * (0.95f + 0.07f * cos(ph)), size.height * (0.06f + 0.04f * sin(ph))),
-                                  radius = size.maxDimension * 0.55f
-                              )
-                          )
-                          drawRect(
-                              Brush.radialGradient(
-                                  colors = listOf(accent.copy(alpha = 0.16f), Color.Transparent),
-                                  center = Offset(size.width * (0.05f + 0.07f * sin(ph)), size.height * (0.90f + 0.04f * cos(ph))),
-                                  radius = size.maxDimension * 0.55f
-                              )
-                          )
-                          drawRect(
-                              Brush.radialGradient(
-                                  colors = listOf(accent.copy(alpha = 0.10f), Color.Transparent),
-                                  center = Offset(size.width * (0.55f + 0.2f * cos(ph + 2f)), size.height * (0.5f + 0.15f * sin(ph + 1f))),
-                                  radius = size.maxDimension * 0.4f
-                              )
-                          )
-                      },
-              ) {
-                  // the dot grid never changes, so it lives in its own layer and is drawn only once
-                  Box(
-                      Modifier
-                          .fillMaxSize()
-                          .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                          .drawBehind {
-                              drawRect(
-                                  Brush.radialGradient(
-                                      colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
-                                      center = Offset(size.width / 2f, size.height / 2f),
-                                      radius = size.maxDimension * 0.75f
-                                  )
-                              )
-                              val step = 26.dp.toPx()
-                              val radius = 0.8.dp.toPx()
-                              var y = 0f
-                              while (y < size.height) {
-                                  var x = 0f
-                                  while (x < size.width) {
-                                      drawCircle(Color.White.copy(alpha = 0.05f), radius, Offset(x, y))
-                                      x += step
-                                  }
-                                  y += step
-                              }
-                          }
-                  )
-                  content()
-              }
+              Box(Modifier.fillMaxSize().background(Color.Black), content = content)
           }
 
           // ---------------------------------------------------------------------------- modifiers
 
-          /** The light edge of liquid glass: bright where the light hits (top left), fading, then a soft glint at the bottom right. */
-          private fun rimBrush(rim: Color): Brush {
-              fun a(f: Float) = rim.copy(alpha = (rim.alpha * f).coerceIn(0f, 1f))
-              return Brush.linearGradient(
-                  colors = listOf(a(3.4f), a(0.5f), a(0.2f), a(1.8f)),
-                  start = Offset(0f, 0f),
-                  end = Offset(900f, 1400f)
-              )
-          }
-
-          /** Liquid glass: a tinted, slightly curved surface with a bright top highlight and a glowing edge. */
+          /** A flat rounded card with a hairline edge. */
           fun Modifier.glass(shape: Shape, fill: Color = JC.Glass, rim: Color = JC.Rim): Modifier =
               this.clip(shape)
-                  .background(
-                      Brush.linearGradient(
-                          colors = listOf(
-                              fill.copy(alpha = (fill.alpha * 2.4f).coerceIn(0f, 1f)),
-                              fill,
-                              fill.copy(alpha = (fill.alpha * 1.5f).coerceIn(0f, 1f))
-                          ),
-                          start = Offset(0f, 0f),
-                          end = Offset(700f, 1100f)
-                      ),
-                      shape
-                  )
-                  .drawBehind {
-                      // soft light across the top, like light bending through the glass
-                      drawRect(
-                          Brush.verticalGradient(
-                              listOf(Color.White.copy(alpha = 0.14f), Color.Transparent),
-                              startY = 0f,
-                              endY = size.height * 0.45f
-                          )
-                      )
-                  }
-                  .border(1.dp, rimBrush(rim), shape)
+                  .background(fill, shape)
+                  .border(0.5.dp, rim, shape)
 
-          /** Floating liquid-glass pill (top bar, dock): brighter surface, glowing edge and a soft accent shadow. */
+          /** Floating bar (the dock): same card, a touch more opaque. */
           fun Modifier.glassPill(shape: Shape, accent: Color): Modifier =
-              this.shadow(16.dp, shape, ambientColor = accent.copy(alpha = 0.25f), spotColor = accent.copy(alpha = 0.25f))
-                  .clip(shape)
-                  .background(
-                      Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.24f), Color.White.copy(alpha = 0.07f), Color.White.copy(alpha = 0.12f))),
-                      shape
-                  )
-                  .drawBehind {
-                      drawRect(
-                          Brush.verticalGradient(
-                              listOf(Color.White.copy(alpha = 0.22f), Color.Transparent),
-                              startY = 0f,
-                              endY = size.height * 0.5f
-                          )
-                      )
-                  }
-                  .border(1.dp, rimBrush(JC.Rim), shape)
+              this.clip(shape)
+                  .background(Color(0xFF1C1C1E), shape)
+                  .border(0.5.dp, JC.Rim, shape)
 
           /** Click with a visible pressed state (shrinks and dims a little). */
           fun Modifier.pressable(enabled: Boolean = true, onClick: () -> Unit): Modifier = composed {
@@ -3100,24 +2974,43 @@ jobs:
 
           @Composable
           fun Avatar(modifier: Modifier = Modifier) {
-              val accent = LocalAccent.current
+              Box(modifier.size(40.dp).clip(CircleShape), contentAlignment = Alignment.Center) {
+                  JarvisMark(Modifier.fillMaxSize())
+              }
+          }
+
+          @Composable
+          private fun RoundButton(icon: MenuIcon, onClick: () -> Unit) {
               Box(
-                  modifier
-                      .size(44.dp)
-                      .drawBehind { drawCircle(accent.copy(alpha = 0.18f), radius = size.minDimension / 2f + 6.dp.toPx()) }
-                      .border(2.dp, accent, CircleShape)
-                      .clip(CircleShape),
+                  Modifier
+                      .size(40.dp)
+                      .clip(CircleShape)
+                      .background(JC.Raised, CircleShape)
+                      .pressable(onClick = onClick),
                   contentAlignment = Alignment.Center
               ) {
-                  val logo = Brand.LOGO_RES
-                  if (logo != null) {
-                      Image(painterResource(logo), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                  } else {
-                      JarvisMark(Modifier.fillMaxSize().padding(7.dp))
+                  Canvas(Modifier.size(16.dp)) {
+                      val sw = 2.dp.toPx()
+                      val c = Color.White
+                      when (icon) {
+                          MenuIcon.HAMBURGER -> {
+                              drawLine(c, Offset(0f, size.height * 0.22f), Offset(size.width, size.height * 0.22f), sw, StrokeCap.Round)
+                              drawLine(c, Offset(0f, size.height * 0.78f), Offset(size.width, size.height * 0.78f), sw, StrokeCap.Round)
+                          }
+                          MenuIcon.CLOSE -> {
+                              drawLine(c, Offset(0f, 0f), Offset(size.width, size.height), sw, StrokeCap.Round)
+                              drawLine(c, Offset(size.width, 0f), Offset(0f, size.height), sw, StrokeCap.Round)
+                          }
+                          MenuIcon.BACK -> {
+                              drawLine(c, Offset(size.width * 0.7f, 0f), Offset(size.width * 0.2f, size.height * 0.5f), sw, StrokeCap.Round)
+                              drawLine(c, Offset(size.width * 0.2f, size.height * 0.5f), Offset(size.width * 0.7f, size.height), sw, StrokeCap.Round)
+                          }
+                      }
                   }
               }
           }
 
+          /** Big plain title on the left, a small round button on the side. */
           @Composable
           fun TopBar(
               title: String,
@@ -3127,50 +3020,17 @@ jobs:
               modifier: Modifier = Modifier
           ) {
               val accent = LocalAccent.current
-              val shape = RoundedCornerShape(30.dp)
               Row(
-                  modifier
-                      .fillMaxWidth()
-                      .glassPill(shape, accent)
-                      .padding(horizontal = 10.dp, vertical = 8.dp),
+                  modifier.fillMaxWidth().heightIn(min = 48.dp),
                   verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  horizontalArrangement = Arrangement.spacedBy(12.dp)
               ) {
-                  Avatar()
+                  if (icon == MenuIcon.BACK) RoundButton(icon, onMenu)
                   Column(Modifier.weight(1f)) {
-                      Text(title, color = Color.White, fontFamily = Anton, fontSize = 18.sp, letterSpacing = 1.sp, maxLines = 1)
-                      Text(status, color = accent, style = JT.tiny, maxLines = 1)
+                      Text(title, color = Color.White, fontFamily = Inter, fontWeight = FontWeight.SemiBold, fontSize = 28.sp, maxLines = 1)
+                      Text(status, color = accent, fontFamily = Inter, fontSize = 13.sp, maxLines = 1)
                   }
-                  Box(
-                      Modifier
-                          .size(44.dp)
-                          .border(1.dp, JC.Rim, CircleShape)
-                          .background(JC.Glass, CircleShape)
-                          .clip(CircleShape)
-                          .pressable(onClick = onMenu),
-                      contentAlignment = Alignment.Center
-                  ) {
-                      Canvas(Modifier.size(18.dp)) {
-                          val sw = 2.dp.toPx()
-                          val c = Color.White
-                          when (icon) {
-                              MenuIcon.HAMBURGER -> {
-                                  drawLine(c, Offset(0f, size.height * 0.2f), Offset(size.width, size.height * 0.2f), sw, StrokeCap.Round)
-                                  drawLine(c, Offset(0f, size.height * 0.5f), Offset(size.width, size.height * 0.5f), sw, StrokeCap.Round)
-                                  drawLine(c, Offset(0f, size.height * 0.8f), Offset(size.width, size.height * 0.8f), sw, StrokeCap.Round)
-                              }
-                              MenuIcon.CLOSE -> {
-                                  drawLine(c, Offset(0f, 0f), Offset(size.width, size.height), sw, StrokeCap.Round)
-                                  drawLine(c, Offset(size.width, 0f), Offset(0f, size.height), sw, StrokeCap.Round)
-                              }
-                              MenuIcon.BACK -> {
-                                  drawLine(c, Offset(size.width, size.height * 0.5f), Offset(0f, size.height * 0.5f), sw, StrokeCap.Round)
-                                  drawLine(c, Offset(size.width * 0.45f, 0f), Offset(0f, size.height * 0.5f), sw, StrokeCap.Round)
-                                  drawLine(c, Offset(size.width * 0.45f, size.height), Offset(0f, size.height * 0.5f), sw, StrokeCap.Round)
-                              }
-                          }
-                      }
-                  }
+                  if (icon != MenuIcon.BACK) RoundButton(icon, onMenu)
               }
           }
 
@@ -3179,50 +3039,31 @@ jobs:
           @Composable
           fun Dock(selected: String, onSelect: (String) -> Unit, modifier: Modifier = Modifier) {
               val accent = LocalAccent.current
-              val shape = RoundedCornerShape(36.dp)
               val items = listOf(
-                  "HOME" to IconKind.HOME,
-                  "FACE" to IconKind.FACE,
-                  "CHAT" to IconKind.CHAT,
-                  "TASKS" to IconKind.TASKS,
-                  "SKILLS" to IconKind.SKILLS
+                  Triple("HOME", IconKind.HOME, "Home"),
+                  Triple("FACE", IconKind.FACE, "Face"),
+                  Triple("CHAT", IconKind.CHAT, "Chat"),
+                  Triple("TASKS", IconKind.TASKS, "Tasks"),
+                  Triple("SKILLS", IconKind.SKILLS, "Skills")
               )
               Row(
-                  modifier
-                      .glassPill(shape, accent)
-                      .padding(6.dp),
-                  horizontalArrangement = Arrangement.spacedBy(2.dp),
+                  modifier.glassPill(RoundedCornerShape(28.dp), accent).padding(horizontal = 6.dp, vertical = 6.dp),
                   verticalAlignment = Alignment.CenterVertically
               ) {
-                  for ((key, kind) in items) {
+                  for ((key, kind, label) in items) {
                       val on = key == selected
-                      val itemShape = RoundedCornerShape(30.dp)
-                      Row(
+                      val tint = if (on) accent else JC.Dim
+                      Column(
                           Modifier
-                              .height(48.dp)
-                              .clip(itemShape)
-                              .then(
-                                  if (on) Modifier
-                                      .background(Brush.verticalGradient(listOf(accent.copy(alpha = 0.95f), accent.copy(alpha = 0.55f))), itemShape)
-                                      .border(1.dp, JC.Rim, itemShape)
-                                  else Modifier
-                              )
+                              .width(62.dp)
+                              .clip(RoundedCornerShape(20.dp))
                               .pressable { onSelect(key) }
-                              .animateContentSize(spring(dampingRatio = 0.8f, stiffness = 420f))
-                              .padding(horizontal = if (on) 14.dp else 12.dp),
-                          verticalAlignment = Alignment.CenterVertically
+                              .padding(vertical = 6.dp),
+                          horizontalAlignment = Alignment.CenterHorizontally,
+                          verticalArrangement = Arrangement.spacedBy(3.dp)
                       ) {
-                          JIcon(kind, if (on) JC.OnAccent else Color(0xFFD0D0D0), 22.dp)
-                          if (on) {
-                              Text(
-                                  key,
-                                  style = JT.label.copy(letterSpacing = 1.sp),
-                                  color = JC.OnAccent,
-                                  fontWeight = FontWeight.Bold,
-                                  maxLines = 1,
-                                  modifier = Modifier.padding(start = 8.dp)
-                              )
-                          }
+                          JIcon(kind, tint, 24.dp)
+                          Text(label, color = tint, fontFamily = Inter, fontSize = 10.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
                       }
                   }
               }
@@ -3232,7 +3073,7 @@ jobs:
 
           @Composable
           fun SectionLabel(text: String, modifier: Modifier = Modifier) {
-              Text(text, color = LocalAccent.current, style = JT.label, modifier = modifier.padding(top = 22.dp, bottom = 8.dp))
+              Text(text, color = JC.Dim, style = JT.label, modifier = modifier.padding(start = 6.dp, top = 24.dp, bottom = 8.dp))
           }
 
           @Composable
@@ -3253,22 +3094,23 @@ jobs:
 
           @Composable
           fun JSwitch(checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
-              val accent = LocalAccent.current
-              val knobX by animateDpAsState(if (checked) 23.dp else 3.dp, label = "knob")
+              val knobX by animateDpAsState(if (checked) 22.dp else 2.dp, spring(dampingRatio = 0.7f, stiffness = 500f), label = "knob")
+              val track = if (checked) Color(0xFF30D158) else Color(0xFF39393D)
               Box(
                   Modifier
-                      .size(width = 46.dp, height = 26.dp)
+                      .size(width = 51.dp, height = 31.dp)
                       .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
-                      .clip(RoundedCornerShape(14.dp))
-                      .background(if (checked) accent else Color(0xFF333333))
+                      .clip(RoundedCornerShape(16.dp))
+                      .background(track)
                       .pressable(enabled = enabled) { onChange(!checked) }
               ) {
                   Box(
                       Modifier
-                          .offset(x = knobX, y = 3.dp)
-                          .size(20.dp)
+                          .offset(x = knobX, y = 2.dp)
+                          .size(27.dp)
+                          .shadow(2.dp, CircleShape)
                           .clip(CircleShape)
-                          .background(if (checked) Color.White else Color(0xFFAAAAAA))
+                          .background(Color.White)
                   )
               }
           }
@@ -3277,25 +3119,23 @@ jobs:
           @Composable
           fun GlassButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, filled: Boolean = false, enabled: Boolean = true) {
               val accent = LocalAccent.current
-              val shape = RoundedCornerShape(24.dp)
+              val shape = RoundedCornerShape(22.dp)
               Box(
                   modifier
-                      .heightIn(min = 48.dp)
+                      .heightIn(min = 44.dp)
                       .graphicsLayer { alpha = if (enabled) 1f else 0.4f }
                       .clip(shape)
-                      .then(
-                          if (filled) Modifier.background(Brush.verticalGradient(listOf(accent.copy(alpha = 0.95f), accent.copy(alpha = 0.6f))), shape)
-                          else Modifier.background(JC.Glass, shape).border(1.dp, JC.Rim, shape)
-                      )
+                      .background(if (filled) accent else JC.Raised, shape)
                       .pressable(enabled = enabled, onClick = onClick)
                       .padding(horizontal = 18.dp, vertical = 10.dp),
                   contentAlignment = Alignment.Center
               ) {
                   Text(
                       text,
-                      style = JT.label.copy(letterSpacing = 1.sp),
-                      color = if (filled) JC.OnAccent else Color.White,
-                      fontWeight = if (filled) FontWeight.Bold else FontWeight.Normal,
+                      fontFamily = Inter,
+                      fontSize = 15.sp,
+                      color = if (filled) Color.White else accent,
+                      fontWeight = FontWeight.SemiBold,
                       maxLines = 1
                   )
               }
@@ -3316,7 +3156,7 @@ jobs:
                       .heightIn(min = 54.dp)
                       .drawBehind {
                           if (divider) {
-                              drawLine(Color.White.copy(alpha = 0.1f), Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx())
+                              drawLine(Color.White.copy(alpha = 0.12f), Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx())
                           }
                       }
                       .then(if (onClick != null) Modifier.pressable(onClick = onClick) else Modifier)
@@ -3325,8 +3165,8 @@ jobs:
                   horizontalArrangement = Arrangement.SpaceBetween
               ) {
                   Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                      Text(title, color = Color.White, fontFamily = Inter, fontSize = 14.sp)
-                      if (hint != null) Text(hint, color = JC.Dim, fontFamily = Inter, fontSize = 11.sp)
+                      Text(title, color = Color.White, fontFamily = Inter, fontSize = 16.sp)
+                      if (hint != null) Text(hint, color = JC.Dim, fontFamily = Inter, fontSize = 12.sp)
                   }
                   trailing()
               }
@@ -3346,7 +3186,7 @@ jobs:
               Box(
                   modifier
                       .heightIn(min = 48.dp)
-                      .glass(RoundedCornerShape(24.dp))
+                      .glass(RoundedCornerShape(24.dp), fill = JC.Raised)
                       .padding(horizontal = 16.dp),
                   contentAlignment = Alignment.CenterStart
               ) {
@@ -3357,7 +3197,7 @@ jobs:
                       value = value,
                       onValueChange = onChange,
                       singleLine = true,
-                      textStyle = TextStyle(color = Color.White, fontFamily = Inter, fontSize = 15.sp),
+                      textStyle = TextStyle(color = Color.White, fontFamily = Inter, fontSize = 16.sp),
                       cursorBrush = SolidColor(accent),
                       visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
                       keyboardOptions = KeyboardOptions(imeAction = imeAction),
@@ -3752,9 +3592,9 @@ jobs:
               val greeting = if (hindi) {
                   (if (hour < 12) "सुप्रभात" else if (hour < 17) "नमस्कार" else "शुभ संध्या") + ", " + name
               } else {
-                  (if (hour < 12) "GOOD MORNING" else if (hour < 17) "GOOD AFTERNOON" else "GOOD EVENING") + ", " + name.uppercase()
+                  (if (hour < 12) "Good morning" else if (hour < 17) "Good afternoon" else "Good evening") + ", " + name
               }
-              val headline = pick(hindi, "मैं आपकी\nक्या मदद करूँ?", "HOW CAN I\nHELP YOU?")
+              val headline = pick(hindi, "मैं आपकी\nक्या मदद करूँ?", "How can I\nhelp you?")
 
               val status = when (orb) {
                   OrbState.LISTENING -> pick(hindi, "सुन रहा हूँ", "LISTENING")
@@ -3764,7 +3604,7 @@ jobs:
                   OrbState.IDLE -> pick(hindi, "ऑनलाइन", "ONLINE")
               }
               val caption = when (orb) {
-                  OrbState.IDLE -> if (prefs.wakeWord) pick(hindi, "छुएँ या कहें \"Hey Jarvis\"", "TAP TO SPEAK · OR SAY HEY JARVIS") else pick(hindi, "बोलने के लिए छुएँ", "TAP TO SPEAK")
+                  OrbState.IDLE -> if (prefs.wakeWord) pick(hindi, "छुएँ या कहें \"Hey Jarvis\"", "Tap to speak, or say \"Hey Jarvis\"") else pick(hindi, "बोलने के लिए छुएँ", "TAP TO SPEAK")
                   OrbState.LISTENING -> if (partial.isNotBlank()) partial else pick(hindi, "सुन रहा हूँ…", "LISTENING…")
                   OrbState.THINKING -> pick(hindi, "सोच रहा हूँ…", "THINKING…")
                   OrbState.SPEAKING -> pick(hindi, "बोल रहा हूँ… रोकने के लिए छुएँ", "SPEAKING… TAP TO STOP")
@@ -3782,12 +3622,12 @@ jobs:
                   TopBar(Brand.NAME, status, MenuIcon.HAMBURGER, onMenu)
 
                   Column(Modifier.fillMaxWidth().padding(top = 26.dp)) {
-                      Text(greeting, color = accent, style = JT.label, maxLines = 1)
+                      Text(greeting, color = JC.Dim, fontFamily = Inter, fontSize = 15.sp, maxLines = 1)
                       Text(
                           headline,
                           color = Color.White,
                           style = JT.heading,
-                          lineHeight = 38.sp,
+                          lineHeight = 40.sp,
                           modifier = Modifier.padding(top = 6.dp)
                       )
                   }
@@ -3798,13 +3638,11 @@ jobs:
                   Text(
                       caption,
                       color = JC.Dim,
-                      style = JT.label.copy(letterSpacing = 3.sp, fontSize = 11.sp),
+                      style = JT.label.copy(fontSize = 14.sp),
                       textAlign = TextAlign.Center,
                       maxLines = 2
                   )
-                  Spacer(Modifier.height(16.dp))
-                  Waveform(active = orb == OrbState.LISTENING || orb == OrbState.SPEAKING, level = if (orb == OrbState.LISTENING) level else 0.5f)
-                  Spacer(Modifier.height(20.dp))
+                  Spacer(Modifier.height(28.dp))
 
                   val tiles = if (hindi) listOf(
                       listOf(Triple(IconKind.ALARM, "अलार्म", "सुबह 7 बजे"), Triple(IconKind.CALL, "कॉल", "मम्मी को")),
@@ -3820,22 +3658,20 @@ jobs:
                       listOf("Set an alarm for 7 AM", "Call Mummy"),
                       listOf("Play music", "Turn on the torch")
                   )
-                  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                  GlassCard(Modifier.enter(0)) {
                       for (r in 0..1) {
-                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                              for (c in 0..1) {
-                                  val t = tiles[r][c]
-                                  QuickTile(
-                                      kind = t.first,
-                                      title = t.second,
-                                      sub = t.third,
-                                      onClick = {
-                                          vm.submit(says[r][c])
-                                          onChat()
-                                      },
-                                      modifier = Modifier.weight(1f).enter(r * 2 + c)
-                                  )
-                              }
+                          for (c in 0..1) {
+                              val t = tiles[r][c]
+                              QuickTile(
+                                  kind = t.first,
+                                  title = t.second,
+                                  sub = t.third,
+                                  divider = !(r == 1 && c == 1),
+                                  onClick = {
+                                      vm.submit(says[r][c])
+                                      onChat()
+                                  }
+                              )
                           }
                       }
                   }
@@ -3871,8 +3707,8 @@ jobs:
                   horizontalArrangement = Arrangement.spacedBy(12.dp)
               ) {
                   Column(Modifier.weight(1f)) {
-                      Text(tag, color = accent, style = JT.tiny)
-                      Text(text, color = Color.White, fontFamily = Inter, fontSize = 13.sp, modifier = Modifier.padding(top = 2.dp))
+                      Text(tag, color = accent, fontFamily = Inter, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+                      Text(text, color = Color.White, fontFamily = Inter, fontSize = 14.sp, modifier = Modifier.padding(top = 2.dp))
                   }
                   GlassButton(action, onAction, filled = true)
               }
@@ -4069,7 +3905,17 @@ jobs:
           import com.jarvis.app.OrbState
 
           /** Picks the Hindi text when the language setting is HINDI, otherwise the English text. */
-          fun pick(hindi: Boolean, hi: String, en: String): String = if (hindi) hi else en
+          fun pick(hindi: Boolean, hi: String, en: String): String = if (hindi) hi else sentence(en)
+
+          /** "WHAT JARVIS CAN DO" becomes "What Jarvis can do": calmer to read. */
+          private fun sentence(en: String): String {
+              if (!en.any { it.isLetter() } || en != en.uppercase()) return en
+              var t = en.lowercase().replaceFirstChar { it.uppercase() }
+              for (w in listOf("Jarvis", "Gemini", "YouTube", "Google", "AI")) {
+                  t = t.replace(Regex("\\b" + w + "\\b", RegexOption.IGNORE_CASE), w)
+              }
+              return t
+          }
 
           /** True while a permission is granted. Re-checks every time you come back to the app. */
           @Composable
@@ -4185,9 +4031,9 @@ jobs:
           import kotlin.math.sin
 
           /**
-           * The Voice Halo. A glowing core surrounded by a ring of sound bars.
-           * Listening: the bars jump with your voice. Speaking: they ripple. Thinking: a light runs around the ring.
-           * Idle: they breathe softly. Error: red.
+           * The Jarvis orb: one soft glowing sphere.
+           * Idle: breathes slowly. Listening: swells with your voice and sends out rings. Speaking: pulses.
+           * Thinking: a bright arc circles it. Error: red.
            */
           @Composable
           fun Orb(
@@ -4214,7 +4060,7 @@ jobs:
                               if (last != 0L) {
                                   val dt = ((now - last) / 1_000_000_000f).coerceAtMost(0.1f)
                                   time += dt
-                                  smooth += (levelNow - smooth) * min(1f, dt * 14f)
+                                  smooth += (levelNow - smooth) * min(1f, dt * 12f)
                               }
                               last = now
                           }
@@ -4234,18 +4080,22 @@ jobs:
                       val t = time
                       val sm = smooth
                       val st = stateNow
-                      val n = 64
-                      val twoPi = (2 * PI).toFloat()
+                      val light = androidx.compose.ui.graphics.lerp(color, Color.White, 0.6f)
+                      val deep = androidx.compose.ui.graphics.lerp(color, Color.Black, 0.55f)
 
-                      val breathe = 1f + 0.03f * sin(t * 1.8f)
-                      val coreR = outer * 0.36f * breathe * (if (st == OrbState.LISTENING) 1f + sm * 0.10f else 1f)
-                      val inner = coreR + 9.dp.toPx()
-                      val maxLen = outer - inner - 2.dp.toPx()
+                      val pulse = when (st) {
+                          OrbState.LISTENING -> sm * 0.16f
+                          OrbState.SPEAKING -> 0.05f + 0.04f * sin(t * 7f)
+                          OrbState.THINKING -> 0.02f * sin(t * 3f)
+                          OrbState.ERROR -> 0.03f * sin(t * 16f)
+                          OrbState.IDLE -> 0.025f * sin(t * 1.6f)
+                      }
+                      val r = outer * 0.52f * (1f + pulse)
 
-                      // soft glow behind everything
+                      // soft glow
                       drawCircle(
                           brush = Brush.radialGradient(
-                              colors = listOf(color.copy(alpha = 0.30f + 0.25f * sm), Color.Transparent),
+                              colors = listOf(color.copy(alpha = 0.32f + 0.25f * sm), Color.Transparent),
                               center = c,
                               radius = outer
                           ),
@@ -4253,104 +4103,82 @@ jobs:
                           center = c
                       )
 
-                      // the ring of bars
-                      val sweep = (t * 2.4f) % twoPi
-                      for (i in 0 until n) {
-                          val a = i.toFloat() / n * twoPi - (PI / 2).toFloat()
-                          val m = min(i, n - i)            // mirrored, so left and right look the same
-                          val wave = (sin(m * 0.55f + t * 3.2f) * 0.5f + 0.5f) * (cos(m * 0.21f - t * 1.7f) * 0.5f + 0.5f)
-                          var f = 0f
-                          var alpha = 1f
-                          when (st) {
-                              OrbState.LISTENING -> {
-                                  f = 0.10f + (0.15f + 0.85f * sm) * (0.30f + 0.70f * wave)
-                                  alpha = 0.55f + 0.45f * f
-                              }
-                              OrbState.SPEAKING -> {
-                                  f = 0.14f + 0.50f * (0.25f + 0.75f * wave) * (0.75f + 0.25f * sin(t * 7f + m * 0.35f))
-                                  alpha = 0.6f + 0.4f * f
-                              }
-                              OrbState.THINKING -> {
-                                  val an = i.toFloat() / n * twoPi
-                                  var d = abs(an - sweep)
-                                  d = min(d, twoPi - d)
-                                  val hl = max(0f, 1f - d / 1.1f)
-                                  f = 0.10f + 0.08f * wave + 0.55f * hl
-                                  alpha = 0.30f + 0.70f * hl
-                              }
-                              OrbState.ERROR -> {
-                                  f = 0.12f + 0.10f * (sin(t * 14f) * 0.5f + 0.5f)
-                                  alpha = 0.9f
-                              }
-                              OrbState.IDLE -> {
-                                  f = 0.08f + 0.12f * wave
-                                  alpha = 0.5f + 0.2f * wave
-                              }
+                      // rings that spread out while it listens or speaks
+                      if (st == OrbState.LISTENING || st == OrbState.SPEAKING) {
+                          for (i in 0..2) {
+                              val p = (t * 0.55f + i / 3f) % 1f
+                              drawCircle(
+                                  color = color.copy(alpha = (1f - p) * 0.35f),
+                                  radius = r * (1.05f + p * 0.55f),
+                                  center = c,
+                                  style = Stroke(width = 1.5.dp.toPx())
+                              )
                           }
-                          val len = f.coerceIn(0.05f, 1f) * maxLen
-                          val dx = cos(a)
-                          val dy = sin(a)
-                          drawLine(
-                              color = color.copy(alpha = alpha.coerceIn(0f, 1f)),
-                              start = Offset(c.x + dx * inner, c.y + dy * inner),
-                              end = Offset(c.x + dx * (inner + len), c.y + dy * (inner + len)),
-                              strokeWidth = 3.2.dp.toPx(),
-                              cap = StrokeCap.Round
+                      }
+
+                      // a bright arc circling it while it thinks
+                      if (st == OrbState.THINKING) {
+                          drawArc(
+                              color = color,
+                              startAngle = (t * 220f) % 360f,
+                              sweepAngle = 100f,
+                              useCenter = false,
+                              topLeft = Offset(c.x - r * 1.2f, c.y - r * 1.2f),
+                              size = androidx.compose.ui.geometry.Size(r * 2.4f, r * 2.4f),
+                              style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round)
                           )
                       }
 
-                      // glass core
+                      // the sphere
                       drawCircle(
                           brush = Brush.radialGradient(
-                              colors = listOf(color.copy(alpha = 0.75f), color.copy(alpha = 0.20f), Color.Black.copy(alpha = 0.92f)),
-                              center = Offset(c.x - coreR * 0.25f, c.y - coreR * 0.30f),
-                              radius = coreR * 1.5f
+                              colors = listOf(light, color, deep),
+                              center = Offset(c.x - r * 0.3f, c.y - r * 0.35f),
+                              radius = r * 1.7f
                           ),
-                          radius = coreR,
+                          radius = r,
                           center = c
                       )
-                      drawCircle(
-                          color = Color.White.copy(alpha = 0.28f),
-                          radius = coreR,
-                          center = c,
-                          style = Stroke(width = 1.dp.toPx())
-                      )
-                      // bright heart that swells with sound
-                      drawCircle(
-                          color = Color.White.copy(alpha = 0.9f),
-                          radius = coreR * (0.16f + 0.10f * sm + (if (st == OrbState.SPEAKING) 0.04f * sin(t * 9f) else 0f)),
-                          center = c
-                      )
+                      // slow moving light inside it
+                      for (i in 0..2) {
+                          val a = t * (0.6f + 0.25f * i) + i * 2.1f
+                          val d = r * (0.22f + 0.12f * sm)
+                          val bc = Offset(c.x + cos(a) * d, c.y + sin(a * 1.2f) * d)
+                          drawCircle(
+                              brush = Brush.radialGradient(
+                                  colors = listOf(light.copy(alpha = 0.45f), Color.Transparent),
+                                  center = bc,
+                                  radius = r * 0.65f
+                              ),
+                              radius = r * 0.65f,
+                              center = bc
+                          )
+                      }
+                      // little shine
+                      drawCircle(Color.White.copy(alpha = 0.30f), r * 0.12f, Offset(c.x - r * 0.38f, c.y - r * 0.45f))
                   }
               }
           }
 
-          /** The Jarvis logo mark: a glowing core inside a ring of sound bars. Not a letter. */
+          /** The Jarvis logo mark: a soft glowing sphere. Not a letter. */
           @Composable
           fun JarvisMark(modifier: Modifier = Modifier) {
               val color = LocalAccent.current
               Canvas(modifier) {
                   val c = Offset(size.width / 2f, size.height / 2f)
-                  val outer = size.minDimension / 2f
-                  val coreR = outer * 0.34f
-                  val inner = coreR + outer * 0.12f
-                  val maxLen = outer - inner
-                  val pattern = floatArrayOf(0.5f, 0.8f, 1.0f, 0.65f, 0.9f, 0.55f, 0.75f)
-                  val n = 20
-                  val twoPi = (2 * PI).toFloat()
-                  for (i in 0 until n) {
-                      val a = i.toFloat() / n * twoPi - (PI / 2).toFloat()
-                      val h = pattern[min(i, n - i) % pattern.size]
-                      drawLine(
-                          color = color,
-                          start = Offset(c.x + cos(a) * inner, c.y + sin(a) * inner),
-                          end = Offset(c.x + cos(a) * (inner + maxLen * h), c.y + sin(a) * (inner + maxLen * h)),
-                          strokeWidth = outer * 0.085f,
-                          cap = StrokeCap.Round
-                      )
-                  }
-                  drawCircle(color, coreR, c)
-                  drawCircle(Color.White.copy(alpha = 0.85f), coreR * 0.32f, Offset(c.x - coreR * 0.15f, c.y - coreR * 0.18f))
+                  val r = size.minDimension / 2f
+                  val light = androidx.compose.ui.graphics.lerp(color, Color.White, 0.6f)
+                  val deep = androidx.compose.ui.graphics.lerp(color, Color.Black, 0.55f)
+                  drawCircle(
+                      brush = Brush.radialGradient(
+                          colors = listOf(light, color, deep),
+                          center = Offset(c.x - r * 0.3f, c.y - r * 0.35f),
+                          radius = r * 1.7f
+                      ),
+                      radius = r,
+                      center = c
+                  )
+                  drawCircle(Color.White.copy(alpha = 0.35f), r * 0.14f, Offset(c.x - r * 0.38f, c.y - r * 0.45f))
               }
           }
           JARVIS_EOF
@@ -4547,6 +4375,10 @@ jobs:
           import androidx.compose.ui.graphics.graphicsLayer
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.ui.draw.drawBehind
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.graphics.StrokeCap
           import kotlinx.coroutines.delay
           import kotlin.math.PI
           import kotlin.math.sin
@@ -4567,43 +4399,50 @@ jobs:
               }
           }
 
-          /** A rounded liquid-glass panel that groups several rows. */
+          /** A rounded dark card that groups several rows. */
           @Composable
           fun GlassCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
               Column(
                   modifier
                       .fillMaxWidth()
-                      .glass(RoundedCornerShape(26.dp))
-                      .padding(horizontal = 16.dp, vertical = 6.dp),
+                      .glass(RoundedCornerShape(20.dp))
+                      .padding(horizontal = 16.dp, vertical = 2.dp),
                   content = content
               )
           }
 
-          /** A big tappable tile with an icon: the quick actions on the Home screen. */
+          /** One quick action: a small colored icon, a title, a hint and an arrow. Stack several inside a GlassCard. */
           @Composable
-          fun QuickTile(kind: IconKind, title: String, sub: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+          fun QuickTile(kind: IconKind, title: String, sub: String, onClick: () -> Unit, modifier: Modifier = Modifier, divider: Boolean = true) {
               val accent = LocalAccent.current
-              val shape = RoundedCornerShape(26.dp)
-              Column(
+              Row(
                   modifier
+                      .fillMaxWidth()
+                      .drawBehind {
+                          if (divider) {
+                              drawLine(Color.White.copy(alpha = 0.12f), Offset(48.dp.toPx(), size.height), Offset(size.width, size.height), 1.dp.toPx())
+                          }
+                      }
                       .pressable(onClick = onClick)
-                      .glass(shape)
-                      .padding(16.dp),
-                  verticalArrangement = Arrangement.spacedBy(14.dp)
+                      .padding(vertical = 11.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(14.dp)
               ) {
                   Box(
-                      Modifier
-                          .size(46.dp)
-                          .clip(CircleShape)
-                          .background(Brush.verticalGradient(listOf(accent.copy(alpha = 0.34f), accent.copy(alpha = 0.08f))), CircleShape)
-                          .border(1.dp, accent.copy(alpha = 0.55f), CircleShape),
+                      Modifier.size(34.dp).clip(RoundedCornerShape(9.dp)).background(accent, RoundedCornerShape(9.dp)),
                       contentAlignment = Alignment.Center
                   ) {
-                      JIcon(kind, accent, 22.dp)
+                      JIcon(kind, Color.White, 20.dp)
                   }
-                  Column {
-                      Text(title, color = Color.White, fontFamily = Inter, fontSize = 15.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
-                      Text(sub, color = JC.Dim, style = JT.tiny, maxLines = 1, modifier = Modifier.padding(top = 2.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(title, color = Color.White, fontFamily = Inter, fontSize = 16.sp, maxLines = 1)
+                      Text(sub, color = JC.Dim, fontFamily = Inter, fontSize = 12.sp, maxLines = 1)
+                  }
+                  Canvas(Modifier.size(width = 8.dp, height = 14.dp)) {
+                      val sw = 2.dp.toPx()
+                      val c = Color(0xFF58585D)
+                      drawLine(c, Offset(0f, 0f), Offset(size.width, size.height / 2f), sw, StrokeCap.Round)
+                      drawLine(c, Offset(size.width, size.height / 2f), Offset(0f, size.height), sw, StrokeCap.Round)
                   }
               }
           }
@@ -4623,7 +4462,7 @@ jobs:
               val shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomEnd = 22.dp, bottomStart = 6.dp)
               Row(
                   modifier
-                      .glass(shape)
+                      .glass(shape, fill = JC.Raised)
                       .padding(horizontal = 18.dp, vertical = 16.dp),
                   horizontalArrangement = Arrangement.spacedBy(7.dp),
                   verticalAlignment = Alignment.CenterVertically
@@ -4635,7 +4474,7 @@ jobs:
                               .offset(y = (-lift).dp)
                               .size(8.dp)
                               .clip(CircleShape)
-                              .background(accent.copy(alpha = 0.6f + 0.4f * (lift / 6f)))
+                              .background(Color.White.copy(alpha = 0.45f + 0.5f * (lift / 6f)))
                       )
                   }
               }
@@ -4753,7 +4592,7 @@ jobs:
                                   .clip(itemShape)
                                   .then(
                                       if (on) Modifier.background(
-                                          Brush.verticalGradient(listOf(accent.copy(alpha = 0.95f), accent.copy(alpha = 0.55f))),
+                                          androidx.compose.ui.graphics.SolidColor(accent),
                                           itemShape
                                       ) else Modifier
                                   )
@@ -4763,7 +4602,7 @@ jobs:
                               Text(
                                   o.second,
                                   style = JT.label.copy(letterSpacing = 1.sp),
-                                  color = if (on) JC.OnAccent else Color(0xFFCCCCCC),
+                                  color = if (on) JC.OnAccent else Color(0xFFAAAAAA),
                                   fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
                                   maxLines = 1
                               )
@@ -5088,15 +4927,16 @@ jobs:
                   Text(
                       Brand.NAME,
                       color = Color.White,
-                      fontFamily = Anton,
-                      fontSize = 44.sp,
-                      letterSpacing = spread.sp,
+                      fontFamily = Inter,
+                      fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                      fontSize = 40.sp,
+                      letterSpacing = (spread / 4f).sp,
                       modifier = Modifier.padding(top = 28.dp)
                   )
                   Text(
-                      "YOUR PERSONAL ASSISTANT",
-                      color = LocalAccent.current,
-                      style = JT.label.copy(letterSpacing = 3.sp),
+                      "Your personal assistant",
+                      color = JC.Dim,
+                      style = JT.label.copy(fontSize = 15.sp),
                       modifier = Modifier.padding(top = 6.dp)
                   )
               }
@@ -5234,11 +5074,12 @@ jobs:
           object JC {
               val Bg = Color.Black
               val Ink = Color.White
-              val Dim = Color(0xFF8A8A8A)
-              val Rim = Color(0x29FFFFFF)       // white 16%
-              val Glass = Color(0x0FFFFFFF)     // white 6%
-              val OnAccent = Color(0xFF00131A)  // near-black text on accent buttons
-              val Red = Color(0xFFE8332B)
+              val Dim = Color(0xFF8E8E93)
+              val Rim = Color(0x1FFFFFFF)       // hairline edge
+              val Glass = Color(0xFF1C1C1E)     // a flat dark card, like iOS
+              val Raised = Color(0xFF2C2C2E)    // buttons and bubbles on top of a card
+              val OnAccent = Color.White
+              val Red = Color(0xFFFF453A)
           }
 
           data class AccentOption(val key: String, val color: Color)
@@ -5246,13 +5087,13 @@ jobs:
           /** The glow colors you can pick in Settings. Only ONE is used at a time. */
           object Accents {
               val all = listOf(
-                  AccentOption("cyan", Color(0xFF18E0FF)),
-                  AccentOption("red", Color(0xFFE8332B)),
-                  AccentOption("lime", Color(0xFF7CFF3C)),
-                  AccentOption("orange", Color(0xFFFF9F1A)),
-                  AccentOption("purple", Color(0xFFA45BFF)),
-                  AccentOption("pink", Color(0xFFFF4FA3)),
-                  AccentOption("gold", Color(0xFFFFC933))
+                  AccentOption("cyan", Color(0xFF0A84FF)),
+                  AccentOption("red", Color(0xFFFF453A)),
+                  AccentOption("lime", Color(0xFF30D158)),
+                  AccentOption("orange", Color(0xFFFF9F0A)),
+                  AccentOption("purple", Color(0xFFBF5AF2)),
+                  AccentOption("pink", Color(0xFFFF375F)),
+                  AccentOption("gold", Color(0xFFFFD60A))
               )
 
               fun byKey(key: String): AccentOption = all.firstOrNull { it.key == key } ?: all[0]
@@ -5261,22 +5102,19 @@ jobs:
           val LocalAccent = staticCompositionLocalOf { Accents.all[0].color }
           val LocalReduceMotion = staticCompositionLocalOf { false }
 
-          /** The three fonts of the design. Hindi text falls back to the phone's Devanagari font. */
-          val Anton = FontFamily(Font(R.font.anton, FontWeight.Normal))
+          /** One clean font for everything (Hindi text falls back to the phone's Devanagari font). */
           val Inter = FontFamily(
               Font(R.font.inter_regular, FontWeight.Normal),
               Font(R.font.inter_semibold, FontWeight.SemiBold)
           )
-          val Mono = FontFamily(
-              Font(R.font.space_mono_regular, FontWeight.Normal),
-              Font(R.font.space_mono_bold, FontWeight.Bold)
-          )
+          val Anton = Inter
+          val Mono = Inter
 
           object JT {
-              val label = TextStyle(fontFamily = Mono, fontSize = 11.sp, letterSpacing = 2.sp)
-              val tiny = TextStyle(fontFamily = Mono, fontSize = 10.sp, letterSpacing = 1.sp)
-              val body = TextStyle(fontFamily = Inter, fontSize = 14.sp)
-              val heading = TextStyle(fontFamily = Anton, fontSize = 34.sp, letterSpacing = 1.sp)
+              val label = TextStyle(fontFamily = Inter, fontSize = 13.sp)
+              val tiny = TextStyle(fontFamily = Inter, fontSize = 12.sp)
+              val body = TextStyle(fontFamily = Inter, fontSize = 16.sp)
+              val heading = TextStyle(fontFamily = Inter, fontWeight = FontWeight.SemiBold, fontSize = 34.sp)
           }
 
           @Composable
@@ -6026,7 +5864,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/anton.ttf
-          H4sIAJWrA2sC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
+          H4sIAJbrBGsC/907aUAUx9JdUzPLfSyniCIrV7wRBBSjoiJ4izcKKjcocghoYhRPEjXG25iIRpEY
           o8b7+dQoHsQkaryeUWIUjfJ8msTgET9jdGF7v+rZBTExL3nvx/fj26Z7erqrqqurq2qqewYGjDEt
           FTJzjI7sFcW0bCJj7VpTq1t0zKChTuM8p9J9JGNWadFDh/cI2NjtOGMdt1H/qkFD2wUt9Hc7y5gu
           he5HJGcl5vbom9Gd7svoPiV5SoF310/bWzLWsoAxaVhabnpWnJT5kLHm3tS/LT0xP5dZUGLtxL1t
@@ -6192,7 +6030,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_regular.otf
-          H4sIAJWrA2sC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
+          H4sIAJbrBGsC/8V8CXxUxdJvT2Y6HLYBMhnWAQayQMKSkIQtCRL2sO+LoOwBwr6ERUCJ4II2XlFR
           uIqK4HYRCCLci4BXVAQVFFfE9SIqoKIgonVmapJ5/z5ngIBR8N3vfS/5dfr06erqqurqqurqA30H
           DeorKolC4RQ5nbp29Wcdum25EOJDIZoEunXu0lXsF4eEaLET7xp369d3YJNl3bahfUyImt93Gzi4
           487gzvNC9ACMSO47MCVtZf+arYVo/jnao8dNGzOzV8y9J4RI3Y728Ul5Y8anfnZunhBN30W71SS8
@@ -6382,7 +6220,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/inter_semibold.otf
-          H4sIAJWrA2sC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
+          H4sIAJbrBGsC/8V8CXiURdJ/T2Y6eQNhgLwZziEEAonIGQg3KEECQgCRS86EhASScIWQAwF3owK6
           NIgiQlTkEEVArg+QG8V7VxCQQw4ROUQRUIRF653pSeb/63cmISCH637P9595evqqrq6urq6uru7k
           sf79H2MhrIBZWadHunaNYI93WsYYO8JYo7huXeK7ss/YPsZiPCh7oFufx/o9+kRCKGPN6zFWfWW3
           fgM6b3Nvu8FYAmDYg4/1a9r8peo1JjLWFPVsxMhxyVk9Q+f+wFgzA/lz6WnJqc0Kr7/GWONqyLdK
@@ -6580,7 +6418,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_bold.ttf
-          H4sIAJWrA2sC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
+          H4sIAJbrBGsC/818CXRUVdbuGe69VbfmOXNSlaQyEKCSSkIIBFJgZBYCRAgIGEImphDClIDMICBi
           wCEirUDzIyLSmKaRRrAhtLFtFaRp4UcEFFoUhxgVaWSoOnn73Kow2Ha//6311novxa264zln77PP
           3t8eLggjhMzwJSBT/4IH+yEzmoZQQTqcdfQvHDayYO6QOXA8AI6d/Uc+3Lcwc9INOK6C477DRnq8
           a5McyxHqUQfHoyZNn1jTd1BVHzj+GxyXTZo727lv4O87IeT7GCG8oqKmcvrMrNwpCPXMguuvVU6c
@@ -6801,7 +6639,7 @@ jobs:
           JARVIS_EOF
           mkdir -p "app/src/main/res/font"
           base64 -d <<'JARVIS_EOF' | gunzip > app/src/main/res/font/space_mono_regular.ttf
-          H4sIAJWrA2sC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
+          H4sIAJbrBGsC/918eWAU1dLvWXqbJbNlJjOTZbIxCRhCNpIQCGQI+47AhbBvAcOOAkpAJMgLAROI
           CGYIoET0IkYELkIMiwEhgBgUEXBBucgFFzSiHxdQYXJ4dXomEXzX733/vsfQPd093edU1alT9as6
           1UEYIWSGnYBMvbr36InMaCZCvY7A1ZBegwcN7f5k/wVw/jmcR/Ua+rfcwWmTf4Nz2FDuoKFJqat8
           tlcR6gTPoOGTZ02cm9u3oCuc18N5/uQn50dd98p6hLr9ghBJnjr3sVmjyYzLCGW3ht93PDZx3lwk
